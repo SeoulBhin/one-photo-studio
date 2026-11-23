@@ -1,0 +1,143 @@
+"""한 장 스튜디오 e2e: python tests/e2e.py   (헤드리스 크로미움, 서버는 시험이 직접 띄운다)
+
+protects: 사진 넣기 → 외곽선 → 3D → 점 편집 → 겉면 토글 → 조명 이동 → PNG 저장, 화면에서 사람이 하는 순서 그대로
+fails_when: 3초 안에 외곽선·3D 가 안 뜸 / 점을 끌어도 3D 모양이 그대로 / 조명을 왼쪽↔오른쪽으로 옮겨도 그림자 쪽이 안 바뀜 /
+            저장 PNG 크기가 고른 값과 다름·빈 화면 / 조작 중 WebGL 이 죽음 / 외부 주소로 요청이 나감
+no_claim: 보기 좋은지(저장 PNG 는 out/ 에 남겨 눈으로 본다), 실제 GPU 브라우저 동작(헤드리스는 소프트웨어 렌더링)
+"""
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from PIL import Image
+from playwright.sync_api import sync_playwright
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "out"
+SAMPLES = ["bottle_amber.png", "bottle_white.png"]
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def blank_ratio(path):
+    """배경(왼쪽 위 픽셀)과 눈에 띄게 다른 픽셀 비율"""
+    raw = Image.open(path).convert("RGB").resize((216, 270)).tobytes()
+    bg = raw[0:3]
+    n = len(raw) // 3
+    return sum(1 for i in range(n) if max(abs(raw[i * 3 + c] - bg[c]) for c in range(3)) > 12) / n
+
+
+def shadow_x(path):
+    """바닥 쪽(아래 45%)에서 배경보다 어두운 픽셀의 가로 무게중심(0~1)"""
+    w, h = 216, 270
+    g = Image.open(path).convert("L").resize((w, h)).tobytes()
+    bg = g[(h - 3) * w + 2]
+    xs = [x for y in range(int(h * 0.55), h) for x in range(w) if bg - g[y * w + x] > 10]
+    return sum(xs) / len(xs) / w if xs else None
+
+
+FAILS = []
+
+
+def check(cond, msg):
+    print(("  ok   " if cond else "  FAIL ") + msg)
+    if not cond:
+        FAILS.append(msg)
+
+
+def main():
+    OUT.mkdir(exist_ok=True)
+    port = free_port()
+    srv = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), str(port)], stdout=subprocess.PIPE)
+    assert srv.stdout is not None
+    srv.stdout.readline()  # 준비 줄
+    origin = f"http://127.0.0.1:{port}"
+    outside = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
+            page = browser.new_page(viewport={"width": 1440, "height": 900}, accept_downloads=True)
+            page.on("request", lambda r: None if r.url.startswith((origin, "data:", "blob:")) else outside.append(r.url))
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(origin)
+
+            for name in SAMPLES:
+                print(f"[{name}]")
+                t0 = time.perf_counter()
+                page.set_input_files("#file", str(ROOT / "samples" / name))
+                page.wait_for_function("() => document.querySelector('#status').textContent.includes('외곽선을 땄어요')", timeout=5000)
+                dt = time.perf_counter() - t0
+                check(dt < 3, f"외곽선·3D {dt:.2f}초 (3초 안)")
+                n = page.evaluate("studio.state.profile.points.length")
+                check(3 <= n <= 24, f"점 {n}개")
+
+                # 점 끌기 → 3D 정점이 바뀌는가
+                before = page.evaluate("Array.from(studio.viewer.mesh.geometry.attributes.position.array.slice(0, 600))")
+                pt = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect();
+                    const p = e.sorted()[Math.floor(e.profile.points.length / 2)], s = e.toScreen(p);
+                    return [r.left + s.x, r.top + s.y]; }""")
+                page.mouse.move(*pt)
+                page.mouse.down()
+                page.mouse.move(pt[0] + 25, pt[1], steps=4)
+                page.mouse.up()
+                after = page.evaluate("Array.from(studio.viewer.mesh.geometry.attributes.position.array.slice(0, 600))")
+                check(before != after, "점을 끌면 3D 모양이 바뀜")
+                page.click("#redo")  # 다음 확인은 자동 외곽선으로
+
+                # 조명 왼쪽 → 오른쪽: 그림자 쪽이 바뀌는가 (저장 PNG 로 잰다)
+                shots = {}
+                for side, az in (("left", -70), ("right", 70)):
+                    page.evaluate(f"studio.viewer.setLight({{azimuth: {az}, elevation: 35}})")
+                    with page.expect_download() as dl:
+                        page.click("#save")
+                    path = OUT / f"{Path(name).stem}_{side}.png"
+                    dl.value.save_as(path)
+                    shots[side] = path
+                im = Image.open(shots["left"])
+                check(im.size == (1080, 1350), f"PNG 크기 {im.size}")
+                br = blank_ratio(shots["left"])
+                check(br > 0.05, f"빈 화면 아님(배경과 다른 픽셀 {br:.1%})")
+                lx, rx = shadow_x(shots["left"]), shadow_x(shots["right"])
+                check(lx is not None and rx is not None and lx > 0.5 > rx,
+                      f"그림자 무게중심: 왼쪽 조명 {lx:.2f} > 0.5 > 오른쪽 조명 {rx:.2f}")
+
+                # 단색으로 바꿔 저장, 2160 크기
+                page.check("input[value=solid]")
+                page.select_option("#size", "2160x2700")
+                with page.expect_download() as dl:
+                    page.click("#save")
+                p2 = OUT / f"{Path(name).stem}_solid.png"
+                dl.value.save_as(p2)
+                check(Image.open(p2).size == (2160, 2700), "단색 2160×2700 저장")
+                page.check("input[value=photo]")
+                page.select_option("#size", "1080x1350")
+                check(not page.evaluate("studio.viewer.lost"), "WebGL 살아 있음")
+
+            # 제품 없는 사진 → 오류 문구, 앱은 계속
+            blank = OUT / "blank.png"
+            Image.new("RGB", (600, 750), (205, 205, 205)).save(blank)
+            page.set_input_files("#file", str(blank))
+            page.wait_for_function("() => document.querySelector('#status').classList.contains('bad')", timeout=5000)
+            check("찾지 못했어요" in (page.text_content("#status") or ""), "빈 사진 → 오류 문구")
+            page.set_input_files("#file", str(ROOT / "samples" / SAMPLES[0]))
+            page.wait_for_function("() => document.querySelector('#status').textContent.includes('외곽선을 땄어요')", timeout=5000)
+            check(True, "오류 뒤에도 다음 사진이 열림")
+
+            check(not outside, f"외부 요청 {len(outside)}건 {outside[:3]}")
+            check(not errors, f"페이지 오류 {errors[:3]}")
+            browser.close()
+    finally:
+        srv.terminate()
+    print("e2e:", "PASS" if not FAILS else f"FAIL {len(FAILS)}")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

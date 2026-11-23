@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>한 장 스튜디오</title>
+<link rel="stylesheet" href="src/style.css">
+<script type="importmap">{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/"}}</script>
+</head>
+<body>
+<header>
+  <h1>한 장 스튜디오</h1>
+  <p>제품 사진 한 장 → 병 3D → 앵글·조명 → PNG</p>
+</header>
+
+<main>
+  <section class="panel" id="left">
+    <h2>1. 사진과 외곽선</h2>
+    <label class="drop">
+      <input type="file" id="file" accept="image/*">
+      <span>사진을 끌어다 놓거나 눌러서 고르기</span>
+    </label>
+    <div class="row">
+      <span class="muted">예시</span>
+      <button data-sample="samples/bottle_amber.png">갈색 앰플</button>
+      <button data-sample="samples/bottle_white.png">흰 로션병</button>
+    </div>
+    <div class="stage" id="editbox"><canvas id="edit"></canvas></div>
+    <p class="hint">점 끌기 · 선 위 더블클릭 = 점 추가 · 점 우클릭 = 삭제 · 점선(축) 끌기 <span id="count" class="muted"></span></p>
+    <div class="row">
+      <label for="tol">배경 허용치</label>
+      <input type="range" id="tol" min="8" max="60" value="22">
+      <span id="tolv" class="num">22</span>
+      <button id="redo">다시 따기</button>
+    </div>
+  </section>
+
+  <section class="panel" id="center">
+    <h2>2. 3D <span class="muted">드래그 = 돌리기 · 휠 = 가까이</span></h2>
+    <div class="stage" id="viewbox"><canvas id="view"></canvas></div>
+  </section>
+
+  <section class="panel" id="right">
+    <h2>3. 겉면</h2>
+    <div class="row">
+      <label><input type="radio" name="surface" value="photo" checked> 사진 입히기</label>
+      <label><input type="radio" name="surface" value="solid"> 단색</label>
+      <input type="color" id="color" value="#e9e6df" disabled>
+    </div>
+
+    <h2>4. 조명</h2>
+    <div id="pad" title="위에서 본 바닥 · 아래쪽이 정면"><i class="front">정면</i><b id="dot"></b></div>
+    <p class="hint" id="lightv"></p>
+    <div class="row">
+      <label for="power">세기</label>
+      <input type="range" id="power" min="0.3" max="4" step="0.1" value="2.2">
+    </div>
+
+    <h2>5. 저장</h2>
+    <div class="row">
+      <select id="size">
+        <option value="1080x1350">1080 × 1350</option>
+        <option value="2160x2700">2160 × 2700</option>
+      </select>
+      <button id="save" class="primary">PNG 저장</button>
+    </div>
+  </section>
+</main>
+<footer id="status">사진을 넣으면 시작해요.</footer>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

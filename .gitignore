@@ -1,3 +1,6 @@
 .claude/
 __pycache__/
 out/
+node_modules/
+dist/
+GEMINI.md

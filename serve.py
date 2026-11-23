@@ -1,6 +1,6 @@
-"""한 장 스튜디오 로컬 서버: python serve.py  →  http://127.0.0.1:8411
+"""한 장 스튜디오 로컬 서버: npm run build 후 python serve.py  →  http://127.0.0.1:8411
 
-내 PC 에서만 연다(127.0.0.1). 3단계에서 Codex 연출 컷 요청을 받는 자리도 여기다.
+빌드 결과(dist/)만 내 PC 에서 연다(127.0.0.1). 3단계에서 Codex 연출 컷 요청을 받는 자리도 여기다.
 """
 import functools
 import http.server
@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+DIST = ROOT / "dist"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8411
 
 
-PUBLIC = ("/", "/index.html", "/src/", "/vendor/", "/samples/")
+PUBLIC = ("/", "/index.html", "/assets/", "/samples/")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -52,7 +53,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
-    handler = functools.partial(Handler, directory=str(ROOT))
+    if not (DIST / "index.html").exists():
+        sys.exit("dist/ 가 없어요. 먼저 npm install 과 npm run build 를 하세요")
+    handler = functools.partial(Handler, directory=str(DIST))
     with http.server.ThreadingHTTPServer(("127.0.0.1", PORT), handler) as srv:
         print(f"한 장 스튜디오: http://127.0.0.1:{PORT}", flush=True)
         try:

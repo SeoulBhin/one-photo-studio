@@ -1,8 +1,8 @@
 // 3D 촬영 세트: 말려 올라간 배경지 위 받침에 병을 세우고, 조명 하나·환경 반사·마우스 앵글로 찍는다.
 // 병은 뚜껑·몸통 두 덩어리 + 라벨 띠. 부위마다 재질·색을 따로 입힌다.
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { toLathe } from './outline.js';
 
 export const ASPECT = 4 / 5; // 화면과 저장 PNG 를 같은 비율로 묶어 보이는 그대로 저장한다
@@ -37,7 +37,7 @@ export const CAMERAS = {
 
 export const LIGHTS = {
   key:   { name: '왼쪽 위', azimuth: -45, elevation: 45 },
-  side:  { name: '옆에서', azimuth: 85, elevation: 18 },
+  side:  { name: '옆', azimuth: 85, elevation: 18 },
   back:  { name: '역광', azimuth: 170, elevation: 30 },
   top:   { name: '머리 위', azimuth: 0, elevation: 82 },
 };
@@ -111,6 +111,22 @@ export class Viewer {
     });
     this.resize();
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
+    // 예열: 사진이 들어오기 전에 병에 쓸 재질(사진 입힌 재질 + 그림자)을 한 번 그려
+    // 셰이더 컴파일을 미리 끝낸다. 첫 사진에서 3D 가 늦게 뜨던 것(헤드리스 3~4초)을 줄인다
+    setTimeout(() => this.warmUp(), 0);
+  }
+
+  warmUp() {
+    if (this.lost) return;
+    const tex = new THREE.DataTexture(new Uint8Array([200, 200, 200, 255]), 1, 1);
+    tex.needsUpdate = true;
+    const mesh = new THREE.Mesh(new THREE.LatheGeometry([new THREE.Vector2(0, 0), new THREE.Vector2(0.5, 0), new THREE.Vector2(0.5, 1), new THREE.Vector2(0, 1)], 8), makeMaterial('photo', '#ffffff', tex));
+    mesh.castShadow = mesh.receiveShadow = true;
+    this.scene.add(mesh);
+    this.renderer.render(this.scene, this.camera);
+    this.scene.remove(mesh);
+    mesh.geometry.dispose(); mesh.material.dispose(); tex.dispose();
+    this.render();
   }
 
   resize() {
@@ -324,7 +340,11 @@ export class Viewer {
     scene.environment = this.scene.environment;
     const l = new THREE.DirectionalLight('#ffffff', 2.2); l.position.set(-2, 3, 3); scene.add(l, new THREE.HemisphereLight('#fff', '#bbb', 0.5));
     const geo = new THREE.SphereGeometry(1, 48, 32);
-    const mat = makeMaterial(finish, color, finish === 'photo' ? this.photoTex : null);
+    // 유리 견본은 가벼운 반투명 재질로 흉내만 낸다. 진짜 유리(빛 통과) 셰이더는 처음 컴파일이
+    // 소프트웨어 렌더링에서 2초 가까이 걸려 앱을 연 직후 화면이 멈췄다. 병에는 진짜 유리를 쓴다
+    const mat = finish === 'glass'
+      ? new THREE.MeshStandardMaterial({ color, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.45, envMapIntensity: 1.4 })
+      : makeMaterial(finish, color, finish === 'photo' ? this.photoTex : null);
     if (finish === 'photo' && this.photoTex) {
       // 견본 구에는 사진 가운데를 감아 보인다
       mat.map = this.photoTex;
@@ -339,10 +359,10 @@ export class Viewer {
     const ratio = this.renderer.getPixelRatio();
     this.renderer.setPixelRatio(1);
     this.renderer.setSize(size, size, false);
-    this.renderer.shadowMap.enabled = false;
+    // 그림자 기능은 켠 채로 둔다. 껐다 켜면 three.js 가 모든 셰이더를 다시 컴파일해서
+    // 견본 하나에 2초 가까이 화면이 멈췄다(견본 장면엔 그림자 만드는 조명이 없어 켜 둬도 같다)
     this.renderer.render(scene, cam);
     const url = this.canvas.toDataURL('image/png');
-    this.renderer.shadowMap.enabled = true;
     this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(size0.x, size0.y, true);
     geo.dispose(); mat.dispose();

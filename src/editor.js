@@ -2,7 +2,8 @@
 //  - 점 끌기 / 선 위 더블클릭 = 점 추가 / 점 우클릭 = 점 삭제(3개는 남김) / 축 끌기 / 뚜껑 경계선 위아래로 끌기
 // 좌표는 사진 비율(0~1). 바뀔 때마다 onChange(profile, capY) 를 부른다.
 
-const INK = '#1f1e1c', ACC = '#b4381f';
+// 색은 화면 테마 토큰에서 받는다(setColors). 받기 전 기본값
+let INK = 'black', ACC = 'firebrick', SHADE = 'rgba(246,245,242,0.55)', FONT = 'sans-serif';
 
 const HIT = 9;     // 점을 잡는 반경(px)
 const MIN_POINTS = 3;
@@ -35,6 +36,15 @@ export class Editor {
 
   setLabel(label) { this.label = label; this.draw(); }
 
+  // 테마 토큰(글자색·강조색·바탕·글꼴)을 캔버스에 쓸 값으로
+  setColors({ ink, accent, shade, font }) {
+    if (ink) INK = ink;
+    if (accent) ACC = accent;
+    if (shade) SHADE = shade;
+    if (font) FONT = font;
+    this.draw();
+  }
+
   // 병 위·아래 끝(사진 비율)
   span() { const ys = this.profile.points.map(p => p.y); return [Math.min(...ys), Math.max(...ys)]; }
 
@@ -66,7 +76,7 @@ export class Editor {
     const [top, bottom] = this.span();
     // 병 바깥을 살짝 덮어 따낸 모양이 떠 보이게
     ctx.save();
-    ctx.fillStyle = 'rgba(246,245,242,0.55)';
+    ctx.fillStyle = SHADE;
     ctx.beginPath();
     ctx.rect(0, 0, w, h);
     ctx.moveTo(ax, pts[0].y * h);
@@ -79,21 +89,21 @@ export class Editor {
     // 라벨 자리(병 높이 비율 → 사진 좌표)
     if (this.label) {
       const y1 = (bottom - this.label.y0 * (bottom - top)) * h, y0 = (bottom - this.label.y1 * (bottom - top)) * h;
-      ctx.fillStyle = 'rgba(180,56,31,0.10)';
+      ctx.save(); ctx.globalAlpha = 0.12; ctx.fillStyle = ACC;
       ctx.fillRect(ax - rMax, y0, rMax * 2, y1 - y0);
-      ctx.strokeStyle = 'rgba(180,56,31,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.restore();
+      ctx.strokeStyle = ACC; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
       ctx.strokeRect(ax - rMax + 0.5, y0 + 0.5, rMax * 2 - 1, y1 - y0 - 1);
       ctx.setLineDash([]);
       tag(ctx, '라벨', ax - rMax - 6, y0 + 2, 'right', ACC);
     }
     // 축
-    ctx.strokeStyle = 'rgba(31,30,28,0.45)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.save(); ctx.globalAlpha = 0.5; ctx.strokeStyle = INK; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(ax + 0.5, 0); ctx.lineTo(ax + 0.5, h); ctx.stroke();
     // 왼쪽 거울선
-    ctx.strokeStyle = 'rgba(31,30,28,0.35)';
     ctx.beginPath();
     pts.forEach((p, i) => { const s = this.toScreen(p); i ? ctx.lineTo(2 * ax - s.x, s.y) : ctx.moveTo(2 * ax - s.x, s.y); });
-    ctx.stroke(); ctx.setLineDash([]);
+    ctx.stroke(); ctx.setLineDash([]); ctx.restore();
     // 뚜껑 경계선
     if (this.capY != null) {
       const cy = Math.round(this.capY * h) + 0.5;
@@ -109,7 +119,7 @@ export class Editor {
     for (const p of pts) {
       const s = this.toScreen(p), on = p === this.drag?.point;
       ctx.beginPath(); ctx.arc(s.x, s.y, on ? 5 : 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = on ? INK : '#fff'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = on ? INK : 'white'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.stroke();
     }
   }
 
@@ -212,10 +222,10 @@ function segDist(p, a, b) {
 
 // 선 옆 작은 이름표
 function tag(ctx, text, x, y, align, color) {
-  ctx.font = '500 11px Pretendard, "Malgun Gothic", sans-serif';
+  ctx.font = `500 11px ${FONT}`;
   const tw = ctx.measureText(text).width, pad = 4, bw = tw + pad * 2;
   const bx = align === 'right' ? x - bw : x;
-  ctx.fillStyle = '#fff'; ctx.fillRect(bx, y, bw, 15);
+  ctx.fillStyle = 'white'; ctx.fillRect(bx, y, bw, 15);
   ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.strokeRect(bx + 0.5, y + 0.5, bw - 1, 14);
   ctx.fillStyle = color; ctx.textBaseline = 'middle'; ctx.fillText(text, bx + pad, y + 8);
 }

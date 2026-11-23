@@ -12,11 +12,13 @@
 ## 실행
 
 ```bash
+$ npm install
+$ npm run build
 $ python serve.py
 한 장 스튜디오: http://127.0.0.1:8411
 ```
 
-빌드·설치 없음. 파이썬 표준 라이브러리 서버가 `127.0.0.1` 에만 열리고, 앱 파일(`index.html`·`src/`·`vendor/`·`samples/`)만 내보내며 다른 호스트 이름으로 온 요청은 403 으로 막는다. three.js 는 `vendor/three/` 에 들어 있어 인터넷 없이 돈다.
+화면은 [Astryx](https://www.npmjs.com/package/@astryxdesign/core) 디자인 시스템(React, stone 테마, canvas-editor 템플릿의 틀)으로 만들었다. 글꼴만 한글이 되는 Pretendard 로 바꿔 앱 안에 넣어서 실행 중 외부 요청은 0건이다. 파이썬 표준 라이브러리 서버가 빌드 결과(`dist/`)를 `127.0.0.1` 에만 열고, 다른 호스트 이름으로 온 요청은 403 으로 막는다.
 
 3단계에서 이 서버에 Codex 를 부르는 요청(POST)을 붙일 땐 Origin 확인과 실행마다 바뀌는 토큰도 함께 건다. 다른 웹페이지가 내 PC 의 Codex 를 돌리지 못하게 하려는 것.
 
@@ -46,15 +48,15 @@ $ python serve.py
 
 ```bash
 $ node --test tests/outline.test.mjs   # 합성 이미지 12건: 반지름·턱·흰 병·그림자·라벨·얼룩·튀는 줄·실패·3D 점 목록·뚜껑 경계
-$ python tests/e2e.py                  # 헤드리스 크로미움 52항목: 예시 2장으로 사진→편집(끌기·추가·삭제·축)→덧입히기→조명→저장, 실패 처리, 외부 요청 0건
+$ npm run build && python tests/e2e.py # 헤드리스 크로미움 52항목: 예시 2장으로 사진→편집(끌기·추가·삭제·축)→덧입히기→조명→저장, 실패 처리, 외부 요청 0건
 ```
 
 e2e 가 저장한 PNG 는 `out/` 에 남는다(눈으로 확인용, 저장소엔 안 올림).
 
 ## 예시 사진
 
-`samples/` 의 두 장은 실제 브랜드가 아닌 지어낸 무브랜드 병이다. 내 PC 의 Codex CLI(내장 이미지 생성)로 만들었다.
+`public/samples/` 의 두 장은 실제 브랜드가 아닌 지어낸 무브랜드 병이다. 내 PC 의 Codex CLI(내장 이미지 생성)로 만들었다.
 
 ## 라이선스
 
-MIT. `vendor/three/` 는 three.js(MIT, 저작권 표시는 그 폴더의 LICENSE), `vendor/pretendard/` 는 Pretendard 글꼴(SIL OFL 1.1, 그 폴더의 LICENSE.txt).
+MIT. `src/fonts/` 의 Pretendard 글꼴은 SIL OFL 1.1(`src/fonts/LICENSE-Pretendard.txt`). three.js·React·Astryx 는 npm 패키지(각 라이선스)로 쓴다.

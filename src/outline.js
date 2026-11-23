@@ -159,7 +159,9 @@ export function analyze(rgba, w, h, { tol = DEFAULT_TOL, maxPoints = DEFAULT_POI
   if (frac < 0.02) return { profile: null, mask, reason: 'small' };
   if (frac > 0.9) return { profile: null, mask, reason: 'large' };
   const rows = silhouetteRows(mask, rgba, w, h);
-  const profile = profileFromRows(rows, w, h, maxPoints);
+  let profile = profileFromRows(rows, w, h, maxPoints);
+  // 제품이 사진 옆 가장자리에 닿으면 배경색을 잘못 잡아 바늘처럼 가는 모양이 나온다 → 실패로 돌린다
+  if (profile && Math.max(...profile.points.map(p => p.r)) < 0.01) profile = null;
   return { profile, mask, rows, low, reason: profile ? null : 'edge' };
 }
 
@@ -180,6 +182,7 @@ export function analysisSize(w, h) {
 export function toLathe(profile, aspect, height = 3) {
   const ys = profile.points.map(p => p.y);
   const top = Math.min(...ys), bottom = Math.max(...ys);
+  if (profile.points.length < 3 || bottom - top < 0.05) return null; // 높이가 거의 없으면 만들지 않는다
   const scale = height / Math.max(1e-6, bottom - top);
   const pts = profile.points
     .map(p => [Math.max(0.001, p.r * aspect * scale), (bottom - p.y) * scale])

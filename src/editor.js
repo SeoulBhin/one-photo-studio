@@ -119,7 +119,10 @@ export class Editor {
       return;
     }
     if (this.drag.axis) {
-      this.profile.axisX = clamp(m.x / this.w, 0.02, 0.98);
+      // 축만 옮기고 외곽선 점은 사진 위 제자리에 둔다(반지름을 축과의 거리로 다시 잰다)
+      const next = clamp(m.x / this.w, 0.02, 0.98), dx = next - this.profile.axisX;
+      for (const p of this.profile.points) p.r = Math.max(0, p.r - dx);
+      this.profile.axisX = next;
     } else {
       const p = this.drag.point;
       p.y = clamp(m.y / this.h, 0, 1);
@@ -140,6 +143,7 @@ export class Editor {
   add(e) {
     if (!this.profile) return;
     const m = this.local(e);
+    if (this.nearest(m)) return; // 점 위 더블클릭은 추가가 아니다
     const pts = this.sorted();
     let best = -1, bd = 12;
     for (let i = 0; i < pts.length - 1; i++) {

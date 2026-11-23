@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parent
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8411
 
 
+PUBLIC = ("/", "/index.html", "/src/", "/vendor/", "/samples/")
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     # 윈도우는 레지스트리 때문에 .js 를 text/plain 으로 줄 때가 있어 모듈이 안 뜬다 → 직접 지정
     extensions_map = {
@@ -18,6 +21,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".png": "image/png", ".json": "application/json",
     }
+
+    def allowed(self):
+        # 다른 사이트가 DNS 를 바꿔치기해 이 서버를 읽는 걸 막고(Host 확인), 앱 파일만 내보낸다(.git 등 제외)
+        # 3단계에서 Codex 를 부르는 요청이 붙기 전에 미리 걸어 둔다
+        host = (self.headers.get("Host") or "").lower()
+        if host not in (f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
+            self.send_error(403, "host not allowed")
+            return False
+        path = self.path.split("?", 1)[0]
+        if not (path in PUBLIC[:2] or path.startswith(PUBLIC[2:])) or ".." in path:
+            self.send_error(404)
+            return False
+        return True
+
+    def do_GET(self):
+        if self.allowed():
+            super().do_GET()
+
+    def do_HEAD(self):
+        if self.allowed():
+            super().do_HEAD()
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")

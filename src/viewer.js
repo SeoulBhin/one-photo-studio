@@ -8,7 +8,7 @@ const HEIGHT = 3;            // 병 높이(3D 단위)
 const INSET = 0.97;          // 사진을 입힐 때 가장자리 배경색을 물지 않게 축 쪽으로 살짝 당긴다
 
 export class Viewer {
-  constructor(canvas, { onLost } = {}) {
+  constructor(canvas, { onLost, onRestored } = {}) {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -37,7 +37,7 @@ export class Viewer {
     this.scene.add(this.hemi);
     this.key = new THREE.DirectionalLight('#ffffff', 2.2);
     this.key.castShadow = true;
-    this.key.shadow.mapSize.set(4096, 4096);
+    this.key.shadow.mapSize.set(2048, 2048);
     Object.assign(this.key.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11, near: 0.5, far: 40 });
     this.key.shadow.bias = -0.0005;
     this.key.target.position.set(0, HEIGHT / 3, 0);
@@ -56,6 +56,12 @@ export class Viewer {
 
     this.lost = false;
     canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.lost = true; onLost?.(); });
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.lost = false;
+      if (this.texture) this.texture.needsUpdate = true;
+      onRestored?.();
+      this.requestRender();
+    });
     this.resize();
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
   }
@@ -71,8 +77,11 @@ export class Viewer {
   }
 
   // profile: 사진 비율 좌표 외곽선, image: 사진(HTMLImageElement·Canvas), aspect: 사진 가로/세로
+  // 모양을 만들 수 없으면(점이 한 높이에 몰림) false, 마지막 모양을 그대로 둔다
   setShape(profile, image, aspect) {
-    const { points, scale, bottom } = toLathe(profile, aspect, HEIGHT);
+    const lathe = toLathe(profile, aspect, HEIGHT);
+    if (!lathe) return false;
+    const { points, scale, bottom } = lathe;
     const geo = new THREE.LatheGeometry(points.map(([r, y]) => new THREE.Vector2(r, y)), 96);
     // 사진 입히기용 UV: 정점을 정면에서 사진 위로 그대로 투영(뒷면은 앞면과 같은 곳을 받는다)
     const pos = geo.attributes.position, uv = geo.attributes.uv;
@@ -98,7 +107,15 @@ export class Viewer {
       this.texture.anisotropy = 4;
       this.texture.needsUpdate = true;
     }
+    this.mesh.visible = true;
     this.applySurface();
+    return true;
+  }
+
+  // 외곽선을 못 땄을 때: 이전 병이 화면·저장에 남지 않게 숨긴다
+  clear() {
+    if (this.mesh) this.mesh.visible = false;
+    this.requestRender();
   }
 
   setSurface(kind, color) {
@@ -145,6 +162,7 @@ export class Viewer {
 
   // 고른 크기로 한 번 그리고, 그 자리에서 바로 PNG 로 뜬다(그리고 나서 기다리면 내용이 사라질 수 있다)
   capture(width, height) {
+    if (this.lost || !this.mesh?.visible) return null;
     const size = new THREE.Vector2();
     this.renderer.getSize(size);
     const ratio = this.renderer.getPixelRatio();
@@ -152,7 +170,10 @@ export class Viewer {
     this.renderer.setPixelRatio(1);
     this.renderer.setSize(width, height, false);
     this.renderer.render(this.scene, this.camera);
-    const url = this.canvas.toDataURL('image/png');
+    // 그래픽 카드가 고른 크기를 못 잡으면(약한 GPU) 잘린 그림이 나오므로 저장하지 않는다
+    const gl = this.renderer.getContext();
+    const ok = gl.drawingBufferWidth === width && gl.drawingBufferHeight === height;
+    const url = ok ? this.canvas.toDataURL('image/png') : null;
     this.marker.visible = true;
     this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(size.x, size.y, true);

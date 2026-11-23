@@ -5,11 +5,16 @@ import { Viewer } from './viewer.js';
 
 const $ = (s) => document.querySelector(s);
 const state = { image: null, aspect: 1, profile: null, tol: DEFAULT_TOL, name: '' };
+let loadSeq = 0; // 사진을 연달아 넣으면 마지막 것만 쓴다
 
-const viewer = new Viewer($('#view'), { onLost: () => say('3D 화면이 멈췄어요. 새로고침해 주세요.', true) });
+const viewer = new Viewer($('#view'), {
+  onLost: () => say('3D 화면이 멈췄어요. 잠시 뒤 돌아오지 않으면 새로고침해 주세요.', true),
+  onRestored: () => say('3D 화면이 다시 켜졌어요.'),
+});
 const editor = new Editor($('#edit'), (profile) => {
   state.profile = profile;
-  viewer.setShape(profile, state.image, state.aspect);
+  // 점이 한 높이로 몰리면 모양을 만들 수 없다 → 마지막 모양을 그대로 둔다
+  if (!viewer.setShape(profile, state.image, state.aspect)) say('점들이 한 높이에 몰려 있어요. 위아래로 벌려 주세요.', true);
   $('#count').textContent = `점 ${profile.points.length}개`;
 });
 
@@ -26,13 +31,23 @@ async function loadFile(file) {
 }
 
 async function loadImage(src, name) {
+  const token = ++loadSeq;
   const img = new Image();
   img.src = src;
-  try { await img.decode(); } catch { say('이미지를 열 수 없어요. PNG·JPG 사진을 넣어 주세요.', true); return; }
+  try { await img.decode(); } catch {
+    if (token === loadSeq) say('이미지를 열 수 없어요. PNG·JPG 사진을 넣어 주세요.', true);
+    return;
+  }
+  if (token !== loadSeq) return;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih || Math.max(iw, ih) > 16000 || Math.max(iw / ih, ih / iw) > 10) {
+    say('이 사진은 크기나 비율이 너무 커서 열지 않았어요(16000px·가로세로 10배 안쪽).', true);
+    return;
+  }
   // 3D 겉면용 사본(너무 크면 2048px 로 줄인다)
   const k = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
   const tex = document.createElement('canvas');
-  tex.width = Math.round(img.naturalWidth * k); tex.height = Math.round(img.naturalHeight * k);
+  tex.width = Math.max(1, Math.round(iw * k)); tex.height = Math.max(1, Math.round(ih * k));
   tex.getContext('2d').drawImage(img, 0, 0, tex.width, tex.height);
   state.image = tex;
   state.source = img;
@@ -45,7 +60,7 @@ async function loadImage(src, name) {
 const REASONS = {
   small: '제품을 찾지 못했어요. 배경과 색이 확실히 다른 사진이거나, 배경 허용치를 낮춰 보세요.',
   large: '사진 거의 전체가 제품으로 잡혔어요. 배경이 단색인 사진을 넣거나 허용치를 올려 보세요.',
-  edge: '제품 가장자리를 찾지 못했어요. 배경 허용치를 바꿔 보세요.',
+  edge: '제품 가장자리를 찾지 못했어요. 제품이 사진 가장자리에 닿지 않게 여백을 두거나 배경 허용치를 바꿔 보세요.',
 };
 
 function extract() {
@@ -59,13 +74,15 @@ function extract() {
   const res = analyze(g.getImageData(0, 0, w, h).data, w, h, { tol: state.tol });
   const ms = Math.round(performance.now() - t0);
   if (!res.profile) {
-    editor.set(state.source, null);
+    state.profile = null;
+    viewer.clear();
+    editor.set(state.image, null);
     say(REASONS[res.reason] || REASONS.edge, true);
     $('#count').textContent = '';
     return;
   }
   state.profile = res.profile;
-  editor.set(state.source, res.profile);
+  editor.set(state.image, res.profile);
   viewer.setShape(res.profile, state.image, state.aspect);
   $('#count').textContent = `점 ${res.profile.points.length}개`;
   say(`${state.name} — 외곽선을 땄어요(${ms}ms). 어긋난 곳은 점을 끌어서 고치세요.`);
@@ -121,6 +138,7 @@ $('#save').addEventListener('click', () => {
   if (!state.profile) { say('먼저 사진을 넣어 주세요.', true); return; }
   const [w, h] = $('#size').value.split('x').map(Number);
   const url = viewer.capture(w, h);
+  if (!url) { say('저장하지 못했어요. 3D 화면이 멈췄거나 이 크기를 그래픽 카드가 못 그려요. 작은 크기로 해 보세요.', true); return; }
   const a = document.createElement('a');
   const t = new Date(), p = (n) => String(n).padStart(2, '0');
   a.download = `studio_${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}_${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}.png`;

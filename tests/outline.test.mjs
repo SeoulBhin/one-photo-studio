@@ -4,6 +4,7 @@
 // protects: 사진 → 축·반지름·위아래 끝(3D 모양의 원재료)
 // fails_when: 반지름이 5% 넘게 어긋남 / 흰 병처럼 배경과 차이 작은 몸통을 놓침 / 바닥 그림자를 병으로 잡음 /
 //             배경과 밝기 같은 라벨 때문에 점이 축으로 튐 / 제품 없는 사진에서 엉뚱한 모양을 냄 / 3D 점 목록이 안 닫힘
+//             병 말고 작은 얼룩이 있으면 그쪽을 잡음 / 한두 줄 튀는 폭을 그대로 반지름으로 씀 / 높이 없는 점 목록으로 거대한 모양을 만듦
 // no_claim: 실제 사진 품질(예시 사진 2장은 e2e 와 눈으로 확인), 원근·기울어진 사진, 3D 렌더링 자체
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +13,7 @@ import { analyze, toLathe } from '../src/outline.js';
 const W = 400, H = 500;
 
 // 병 하나 그리기. radius(t) 는 위(t=0)~아래(t=1) 반지름(px). 배경은 위아래 그라데이션.
-function draw({ top = 80, bottom = 420, cx = 200, radius, body = [120, 60, 20], bg = 205, label = null, shadow = false }) {
+function draw({ top = 80, bottom = 420, cx = 200, radius, body = [120, 60, 20], bg = 205, label = null, shadow = false, extra = null }) {
   const px = new Uint8ClampedArray(W * H * 4);
   for (let y = 0; y < H; y++) {
     const g = bg + Math.round((y / H) * 6 - 3); // 은은한 그라데이션
@@ -35,6 +36,7 @@ function draw({ top = 80, bottom = 420, cx = 200, radius, body = [120, 60, 20], 
           c = c.map((v, k) => Math.round(v * (1 - a) + (label && t > label.from && t < label.to ? label.color : body)[k] * a));
         }
       }
+      if (extra && extra(x, y)) c = body;
       px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = 255;
     }
   }
@@ -114,4 +116,22 @@ test('3D 점 목록: 바닥·꼭대기가 축(r=0)으로 닫히고 높이는 3',
   // 반지름/높이 비율이 사진 그대로(70px / 340px)
   const rMax = Math.max(...points.map(p => p[0]));
   assert.ok(Math.abs(rMax / 3 - 70 / 340) < 0.012, `비율 ${rMax / 3}`);
+});
+
+test('병 위쪽에 작은 얼룩이 있어도 가장 큰 덩어리(병)를 잡는다', () => {
+  const dust = (x, y) => x >= 40 && x < 52 && y >= 20 && y < 32; // 병보다 먼저 훑어지는 12×12 얼룩
+  const { profile } = analyze(draw({ radius: bottle, extra: dust }), W, H);
+  assert.ok(Math.abs(profile.top * H - 80) <= 2, `위 ${profile.top * H}`);
+  assert.ok(Math.abs(profile.axisX * W - 200) <= 2, `축 ${profile.axisX * W}`);
+});
+
+test('두 줄짜리 튀어나온 부분은 반지름으로 안 쓴다(5줄 중앙값)', () => {
+  const bump = (x, y) => y >= 300 && y < 302 && x >= 270 && x < 300;
+  const { profile } = analyze(draw({ radius: bottle, extra: bump }), W, H);
+  assert.ok(maxR(profile) <= 70 * 1.05, `튄 폭이 섞임 ${maxR(profile)}`);
+});
+
+test('점이 한 높이에 몰리면 3D 점 목록을 만들지 않는다', () => {
+  const flat = { axisX: 0.5, points: [{ y: 0.5, r: 0.1 }, { y: 0.5, r: 0.2 }, { y: 0.53, r: 0.05 }] };
+  assert.equal(toLathe(flat, 0.8), null);
 });

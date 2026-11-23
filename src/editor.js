@@ -1,6 +1,8 @@
-// 외곽선 편집기: 사진 위에 축(세로선)과 오른쪽 외곽선 점을 그리고, 손으로 고친다.
-//  - 점 끌기 / 선 위 더블클릭 = 점 추가 / 점 우클릭 = 점 삭제(3개는 남김) / 축 끌기
-// 좌표는 사진 비율(0~1). 바뀔 때마다 onChange(profile) 를 부른다.
+// 외곽선 편집기: 사진 위에 축(세로선)과 오른쪽 외곽선 점, 뚜껑 경계선, 라벨 자리를 그리고 손으로 고친다.
+//  - 점 끌기 / 선 위 더블클릭 = 점 추가 / 점 우클릭 = 점 삭제(3개는 남김) / 축 끌기 / 뚜껑 경계선 위아래로 끌기
+// 좌표는 사진 비율(0~1). 바뀔 때마다 onChange(profile, capY) 를 부른다.
+
+const INK = '#1f1e1c', ACC = '#b4381f';
 
 const HIT = 9;     // 점을 잡는 반경(px)
 const MIN_POINTS = 3;
@@ -13,6 +15,8 @@ export class Editor {
     this.image = null;
     this.profile = null;
     this.drag = null;
+    this.capY = null;
+    this.label = null; // { y0, y1 } 병 높이 비율(0 = 바닥). 화면에 자리만 보여 준다
     canvas.addEventListener('pointerdown', (e) => this.down(e));
     canvas.addEventListener('pointermove', (e) => this.move(e));
     canvas.addEventListener('pointerup', (e) => this.up(e));
@@ -22,11 +26,17 @@ export class Editor {
     new ResizeObserver(() => this.fit()).observe(canvas.parentElement);
   }
 
-  set(image, profile) {
+  set(image, profile, capY = null) {
     this.image = image;
     this.profile = profile && { ...profile, points: profile.points.map(p => ({ ...p })) };
+    this.capY = capY;
     this.fit();
   }
+
+  setLabel(label) { this.label = label; this.draw(); }
+
+  // 병 위·아래 끝(사진 비율)
+  span() { const ys = this.profile.points.map(p => p.y); return [Math.min(...ys), Math.max(...ys)]; }
 
   fit() {
     if (!this.image) return;
@@ -53,35 +63,53 @@ export class Editor {
     if (!this.profile) return;
     const pts = this.sorted();
     const ax = this.profile.axisX * w;
+    const [top, bottom] = this.span();
+    // 병 바깥을 살짝 덮어 따낸 모양이 떠 보이게
     ctx.save();
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(0, 0, w, h);
-    // 병 모양(양쪽)을 밝게 다시 보여 준다
+    ctx.fillStyle = 'rgba(246,245,242,0.55)';
     ctx.beginPath();
+    ctx.rect(0, 0, w, h);
     ctx.moveTo(ax, pts[0].y * h);
     for (const p of pts) { const s = this.toScreen(p); ctx.lineTo(s.x, s.y); }
     for (const p of [...pts].reverse()) { const s = this.toScreen(p); ctx.lineTo(2 * ax - s.x, s.y); }
     ctx.closePath();
-    ctx.clip();
-    ctx.drawImage(this.image, 0, 0, w, h);
+    ctx.fill('evenodd');
     ctx.restore();
+    const rMax = Math.max(...pts.map(p => p.r)) * w;
+    // 라벨 자리(병 높이 비율 → 사진 좌표)
+    if (this.label) {
+      const y1 = (bottom - this.label.y0 * (bottom - top)) * h, y0 = (bottom - this.label.y1 * (bottom - top)) * h;
+      ctx.fillStyle = 'rgba(180,56,31,0.10)';
+      ctx.fillRect(ax - rMax, y0, rMax * 2, y1 - y0);
+      ctx.strokeStyle = 'rgba(180,56,31,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.strokeRect(ax - rMax + 0.5, y0 + 0.5, rMax * 2 - 1, y1 - y0 - 1);
+      ctx.setLineDash([]);
+      tag(ctx, '라벨', ax - rMax - 6, y0 + 2, 'right', ACC);
+    }
     // 축
-    ctx.strokeStyle = '#2f6f62'; ctx.setLineDash([5, 5]); ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(ax, 0); ctx.lineTo(ax, h); ctx.stroke();
+    ctx.strokeStyle = 'rgba(31,30,28,0.45)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ax + 0.5, 0); ctx.lineTo(ax + 0.5, h); ctx.stroke();
     // 왼쪽 거울선
-    ctx.strokeStyle = 'rgba(47,111,98,0.55)';
+    ctx.strokeStyle = 'rgba(31,30,28,0.35)';
     ctx.beginPath();
     pts.forEach((p, i) => { const s = this.toScreen(p); i ? ctx.lineTo(2 * ax - s.x, s.y) : ctx.moveTo(2 * ax - s.x, s.y); });
     ctx.stroke(); ctx.setLineDash([]);
+    // 뚜껑 경계선
+    if (this.capY != null) {
+      const cy = Math.round(this.capY * h) + 0.5;
+      ctx.strokeStyle = ACC; ctx.lineWidth = this.drag?.cap ? 2 : 1.25;
+      ctx.beginPath(); ctx.moveTo(ax - rMax - 14, cy); ctx.lineTo(ax + rMax + 14, cy); ctx.stroke();
+      tag(ctx, '뚜껑', ax + rMax + 18, cy - 7, 'left', ACC);
+    }
     // 오른쪽 외곽선 + 점
-    ctx.strokeStyle = '#2f6f62'; ctx.lineWidth = 2;
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
     ctx.beginPath();
     pts.forEach((p, i) => { const s = this.toScreen(p); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
     ctx.stroke();
     for (const p of pts) {
-      const s = this.toScreen(p);
-      ctx.beginPath(); ctx.arc(s.x, s.y, p === this.drag?.point ? 6 : 4.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#2f6f62'; ctx.lineWidth = 2; ctx.stroke();
+      const s = this.toScreen(p), on = p === this.drag?.point;
+      ctx.beginPath(); ctx.arc(s.x, s.y, on ? 5 : 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = on ? INK : '#fff'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.stroke();
     }
   }
 
@@ -104,6 +132,7 @@ export class Editor {
     const m = this.local(e);
     const point = this.nearest(m);
     if (point) this.drag = { point };
+    else if (this.nearCap(m)) this.drag = { cap: true };
     else if (Math.abs(m.x - this.profile.axisX * this.w) < 6) this.drag = { axis: true };
     else return;
     this.canvas.setPointerCapture(e.pointerId);
@@ -114,11 +143,14 @@ export class Editor {
     if (!this.profile) return;
     const m = this.local(e);
     if (!this.drag) {
-      const hover = this.nearest(m) ? 'grab' : Math.abs(m.x - this.profile.axisX * this.w) < 6 ? 'ew-resize' : 'crosshair';
+      const hover = this.nearest(m) ? 'grab' : this.nearCap(m) ? 'ns-resize' : Math.abs(m.x - this.profile.axisX * this.w) < 6 ? 'ew-resize' : 'crosshair';
       this.canvas.style.cursor = hover;
       return;
     }
-    if (this.drag.axis) {
+    if (this.drag.cap) {
+      const [top, bottom] = this.span();
+      this.capY = clamp(m.y / this.h, top, bottom);
+    } else if (this.drag.axis) {
       // 축만 옮기고 외곽선 점은 사진 위 제자리에 둔다(반지름을 축과의 거리로 다시 잰다)
       const next = clamp(m.x / this.w, 0.02, 0.98), dx = next - this.profile.axisX;
       for (const p of this.profile.points) p.r = Math.max(0, p.r - dx);
@@ -166,7 +198,9 @@ export class Editor {
     this.emit();
   }
 
-  emit() { this.onChange?.(this.profile); }
+  nearCap(m) { return this.capY != null && Math.abs(m.y - this.capY * this.h) < 5; }
+
+  emit() { this.onChange?.(this.profile, this.capY); }
 }
 
 function clamp(v, a, b) { return Math.min(b, Math.max(a, v)); }
@@ -174,4 +208,14 @@ function segDist(p, a, b) {
   const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy || 1;
   const t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / L, 0, 1);
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+// 선 옆 작은 이름표
+function tag(ctx, text, x, y, align, color) {
+  ctx.font = '500 11px Pretendard, "Malgun Gothic", sans-serif';
+  const tw = ctx.measureText(text).width, pad = 4, bw = tw + pad * 2;
+  const bx = align === 'right' ? x - bw : x;
+  ctx.fillStyle = '#fff'; ctx.fillRect(bx, y, bw, 15);
+  ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.strokeRect(bx + 0.5, y + 0.5, bw - 1, 14);
+  ctx.fillStyle = color; ctx.textBaseline = 'middle'; ctx.fillText(text, bx + pad, y + 8);
 }

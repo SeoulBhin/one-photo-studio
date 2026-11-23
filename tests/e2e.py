@@ -1,6 +1,6 @@
 """한 장 스튜디오 e2e: python tests/e2e.py   (헤드리스 크로미움, 서버는 시험이 직접 띄운다)
 
-protects: 사진 넣기 → 외곽선 → 3D → 점 편집 → 겉면 토글 → 조명 이동 → PNG 저장, 화면에서 사람이 하는 순서 그대로
+protects: 사진 넣기 → 외곽선 → 3D → 점 편집 → 덧입히기(부위별 재질·색, 라벨, 받침, 배경지, 뚜껑 경계) → 조명 이동 → PNG 저장, 화면에서 사람이 하는 순서 그대로
 fails_when: 3초 안에 외곽선·3D 가 안 뜸 / 점을 끌어도 3D 모양이 그대로 / 조명을 왼쪽↔오른쪽으로 옮겨도 그림자 쪽이 안 바뀜 /
             저장 PNG 크기가 고른 값과 다름·빈 화면 / 예시 사진 외곽선이 확인한 값에서 벗어남 / 실패 뒤 이전 병이 남음 / 조작 중 WebGL 이 죽음 / 외부 주소로 요청이 나감
 no_claim: 보기 좋은지(저장 PNG 는 out/ 에 남겨 눈으로 본다), 실제 GPU 브라우저 동작(헤드리스는 소프트웨어 렌더링)
@@ -88,7 +88,7 @@ def main():
                     check(abs(got[k] - v) <= 0.01, f"{k} {got[k]:.3f} (기대 {v:.3f}±0.01)")
 
                 # 점 끌기 → 3D 정점이 바뀌는가
-                RMAX = "(() => { const a = studio.viewer.mesh.geometry.attributes.position.array; let m = 0; for (let i = 0; i < a.length; i += 3) m += Math.hypot(a[i], a[i + 2]); return m / (a.length / 3); })()"
+                RMAX = "(() => { const a = studio.viewer.parts.body.mesh.geometry.attributes.position.array; let m = 0; for (let i = 0; i < a.length; i += 3) m += Math.hypot(a[i], a[i + 2]); return m / (a.length / 3); })()"
                 before = page.evaluate(RMAX)
                 rs0 = page.evaluate("studio.editor.profile.points.map(p => p.r)")
                 k, pt = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect();
@@ -130,13 +130,13 @@ def main():
                 for side, az in (("left", -70), ("right", 70)):
                     page.evaluate(f"studio.viewer.setLight({{azimuth: {az}, elevation: 35}})")
                     for cast in (True, False):
-                        page.evaluate(f"studio.viewer.mesh.castShadow = {'true' if cast else 'false'}")
+                        page.evaluate(f"studio.viewer.bottle.traverse(o => {{ if (o.isMesh) o.castShadow = {'true' if cast else 'false'}; }})")
                         with page.expect_download() as dl:
                             page.click("#save")
                         path = OUT / f"{Path(name).stem}_{side}{'' if cast else '_noshadow'}.png"
                         dl.value.save_as(path)
                         shots[side if cast else side + "_off"] = path
-                page.evaluate("studio.viewer.mesh.castShadow = true")
+                page.evaluate("studio.viewer.bottle.traverse(o => { if (o.isMesh) o.castShadow = true; })")
                 im = Image.open(shots["left"])
                 check(im.size == (1080, 1350), f"PNG 크기 {im.size}")
                 br = blank_ratio(shots["left"])
@@ -146,15 +146,37 @@ def main():
                 check(lx is not None and rx is not None and lx > 0.5 > rx,
                       f"바닥 그림자 무게중심: 왼쪽 조명 {lx or 0:.2f} > 0.5 > 오른쪽 조명 {rx or 0:.2f}")
 
-                # 단색으로 바꿔 저장, 2160 크기
-                page.check("input[value=solid]")
+                # 덧입힌 상태로 2160 크기 저장
+                # 덧입히기: 부위별 재질·색, 라벨, 받침, 배경지, 뚜껑 경계
+                page.click("#parts [data-part=cap]"); page.click("#finishes [data-finish=metal]")
+                check(page.evaluate("studio.viewer.parts.cap.mesh.material.metalness") == 1, "뚜껑만 금속으로")
+                check(page.evaluate("studio.viewer.parts.body.mesh.material.metalness") != 1, "몸통은 그대로")
+                page.click("#parts [data-part=body]"); page.click("#colors [data-color='#9fb2a3']")
+                check(page.evaluate("studio.viewer.parts.body.finish") == "matte"
+                      and page.evaluate("studio.viewer.parts.body.mesh.material.color.getHexString()") == "9fb2a3",
+                      "사진 상태에서 색을 고르면 그 색의 무광으로")
+                page.click("#parts [data-part=label]"); page.click("#labelSrc [data-src=sample]")
+                check(page.evaluate("!!studio.viewer.label.mesh"), "예시 라벨이 병에 감김")
+                page.click("#pedestals [data-pedestal=round]")
+                check(page.evaluate("studio.viewer.bottle.position.y") > 0.3, "받침을 깔면 병이 그 위로 올라감")
+                page.click("#backdrops [data-backdrop=ink]")
+                check(page.evaluate("studio.viewer.scene.background.getHexString()") == "3b3a38", "배경지 색 바뀜")
+                cap0 = page.evaluate("studio.state.capY")
+                capxy = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect(), pts = e.sorted();
+                    return [r.left + (e.profile.axisX - 0.2) * e.w, r.top + e.capY * e.h]; }""")
+                page.mouse.move(*capxy); page.mouse.down(); page.mouse.move(capxy[0], capxy[1] + 20, steps=4); page.mouse.up()
+                check(page.evaluate("studio.state.capY") > cap0 + 0.01, f"빨간 선을 끌면 뚜껑 경계가 내려감({cap0:.3f} → {page.evaluate('studio.state.capY'):.3f})")
+                page.click("#finishes [data-finish=matte]") if page.locator("#finishPanel").is_visible() else None
                 page.select_option("#size", "2160x2700")
                 with page.expect_download() as dl:
                     page.click("#save")
-                p2 = OUT / f"{Path(name).stem}_solid.png"
+                p2 = OUT / f"{Path(name).stem}_dressed.png"
                 dl.value.save_as(p2)
-                check(Image.open(p2).size == (2160, 2700), "단색 2160×2700 저장")
-                page.check("input[value=photo]")
+                check(Image.open(p2).size == (2160, 2700), "덧입힌 상태로 2160×2700 저장")
+                # 다음 사진 시험을 위해 처음 상태로
+                page.click("#labelSrc [data-src=none]"); page.click("#pedestals [data-pedestal=none]"); page.click("#backdrops [data-backdrop=paper]")
+                for part in ("body", "cap"):
+                    page.click(f"#parts [data-part={part}]"); page.click("#finishes [data-finish=photo]")
                 page.select_option("#size", "1080x1350")
                 check(not page.evaluate("studio.viewer.lost"), "WebGL 살아 있음")
 
@@ -164,13 +186,13 @@ def main():
             page.set_input_files("#file", str(blank))
             page.wait_for_function("() => document.querySelector('#status').classList.contains('bad')", timeout=5000)
             check("찾지 못했어요" in (page.text_content("#status") or ""), "빈 사진 → 오류 문구")
-            check(not page.evaluate("studio.viewer.mesh.visible"), "실패하면 이전 병이 3D 에서 사라짐")
+            check(not page.evaluate("studio.viewer.bottle.visible"), "실패하면 이전 병이 3D 에서 사라짐")
             page.click("#save")
             check("먼저 사진" in (page.text_content("#status") or ""), "실패 뒤 저장은 막힘(이전 병을 저장하지 않음)")
             page.set_input_files("#file", str(ROOT / "samples" / SAMPLES[0]))
             try:
                 page.wait_for_function("() => document.querySelector('#status').textContent.includes('외곽선을 땄어요')", timeout=5000)
-                check(page.evaluate("studio.viewer.mesh.visible"), "오류 뒤에도 다음 사진이 열림")
+                check(page.evaluate("studio.viewer.bottle.visible"), "오류 뒤에도 다음 사진이 열림")
             except Exception as e:  # noqa: BLE001 — 시간 초과도 실패로 세고 끝까지 간다
                 check(False, f"오류 뒤 다음 사진 열기: {type(e).__name__}")
 

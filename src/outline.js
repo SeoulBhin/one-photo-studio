@@ -198,3 +198,25 @@ function median(a) {
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
+
+// 뚜껑 경계(사진 세로 비율). 몸통 어깨 바로 위에서 가장 가까운 잘록한 곳(목)을 경계로 본다.
+// "가장 가는 곳"으로 고르면 스포이트 병은 고무 꼭지 밑을 골라 칼라가 몸통에 붙는다(실제 예시 사진에서 겪음).
+// 목이 뚜렷하지 않은 원기둥 병이면 위에서 15% 지점.
+export function suggestCapSplit(profile) {
+  const pts = [...profile.points].sort((a, b) => a.y - b.y);
+  const top = pts[0].y, bottom = pts[pts.length - 1].y, H = bottom - top;
+  const rMax = Math.max(...pts.map(p => p.r));
+  // 어깨: 가장 굵은 점에서 위로 올라가며 굵기가 최대의 85% 아래로 처음 떨어지는 곳
+  let k = pts.findIndex(p => p.r === rMax);
+  while (k > 0 && pts[k - 1].r >= rMax * 0.85) k--;
+  // 어깨 위쪽에서 이웃보다 가는 점(골짜기) 가운데 어깨에 가장 가까운 것
+  let neck = -1;
+  for (let i = k - 1; i > 0; i--) {
+    if (pts[i].y < top + 0.08 * H) break;
+    if (pts[i].r < rMax * 0.85 && pts[i].r <= pts[i - 1].r && pts[i].r <= pts[i + 1].r) { neck = i; break; }
+  }
+  if (neck < 0) return top + 0.15 * H;
+  // 같은 굵기로 이어지는 목이면 그 윗끝(뚜껑 바로 밑)에서 자른다
+  while (neck > 0 && Math.abs(pts[neck - 1].r - pts[neck].r) < 0.002) neck--;
+  return pts[neck].y;
+}

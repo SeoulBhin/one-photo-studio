@@ -135,3 +135,23 @@ test('점이 한 높이에 몰리면 3D 점 목록을 만들지 않는다', () =
   const flat = { axisX: 0.5, points: [{ y: 0.5, r: 0.1 }, { y: 0.5, r: 0.2 }, { y: 0.53, r: 0.05 }] };
   assert.equal(toLathe(flat, 0.8), null);
 });
+
+test('뚜껑 경계: 잘록한 목에서 자른다, 목이 없으면 위에서 15%', async () => {
+  const { suggestCapSplit } = await import('../src/outline.js');
+  // 위 25% 뚜껑(반지름 40) → 목(20) → 몸통(70)
+  const capped = (t) => (t < 0.25 ? 40 : t < 0.32 ? 20 : 70);
+  const { profile } = analyze(draw({ radius: capped }), W, H);
+  const y = suggestCapSplit(profile) * H;
+  assert.ok(y > 80 + 0.25 * 340 - 4 && y < 80 + 0.32 * 340 + 4, `경계 ${y.toFixed(0)}px`);
+  const tube = { points: [{ y: 0.1, r: 0.2 }, { y: 0.5, r: 0.2 }, { y: 0.9, r: 0.2 }] };
+  assert.ok(Math.abs(suggestCapSplit(tube) - (0.1 + 0.15 * 0.8)) < 1e-9);
+});
+
+test('뚜껑 경계: 스포이트 병은 고무 꼭지 밑이 아니라 칼라 밑 목에서 자른다', async () => {
+  const { suggestCapSplit } = await import('../src/outline.js');
+  // 고무 꼭지(30) → 꼭지 목(15, 가장 가늘다) → 칼라(60) → 유리 목(40) → 몸통(70)
+  const dropper = (t) => (t < 0.1 ? 30 : t < 0.2 ? 15 : t < 0.3 ? 60 : t < 0.36 ? 40 : 70);
+  const { profile } = analyze(draw({ radius: dropper }), W, H);
+  const y = suggestCapSplit(profile) * H;
+  assert.ok(y > 80 + 0.3 * 340 - 6 && y < 80 + 0.36 * 340, `경계 ${y.toFixed(0)}px (칼라 밑 ${80 + 0.3 * 340}px 근처여야)`);
+});

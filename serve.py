@@ -19,7 +19,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {
         **http.server.SimpleHTTPRequestHandler.extensions_map,
         ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
-        ".html": "text/html; charset=utf-8", ".png": "image/png", ".json": "application/json",
+        ".html": "text/html; charset=utf-8", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2",
     }
 
     def allowed(self):

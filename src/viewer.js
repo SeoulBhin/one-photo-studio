@@ -38,7 +38,7 @@ export class Viewer {
     this.key = new THREE.DirectionalLight('#ffffff', 2.2);
     this.key.castShadow = true;
     this.key.shadow.mapSize.set(2048, 2048);
-    Object.assign(this.key.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11, near: 0.5, far: 40 });
+    Object.assign(this.key.shadow.camera, { left: -5, right: 5, top: 5, bottom: -5, near: 0.5, far: 30 });
     this.key.shadow.bias = -0.0005;
     this.key.target.position.set(0, HEIGHT / 3, 0);
     this.scene.add(this.key, this.key.target);

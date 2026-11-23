@@ -105,6 +105,26 @@ def main():
                 check(after > before * 1.01, f"3D 병 평균 반지름도 커짐({before:.3f} → {after:.3f})")
                 page.click("#redo")  # 다음 확인은 자동 외곽선으로
 
+                # 선 위 더블클릭 = 점 추가, 점 우클릭 = 삭제, 축 끌기 = 점은 사진 위 제자리
+                n0 = page.evaluate("studio.editor.profile.points.length")
+                mid = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect(), pts = e.sorted();
+                    let best = 0, gap = 0; for (let i = 0; i < pts.length - 1; i++) { const g = pts[i + 1].y - pts[i].y; if (g > gap) { gap = g; best = i; } }
+                    const a = e.toScreen(pts[best]), b = e.toScreen(pts[best + 1]); return [r.left + (a.x + b.x) / 2, r.top + (a.y + b.y) / 2]; }""")
+                page.mouse.dblclick(*mid)
+                check(page.evaluate("studio.editor.profile.points.length") == n0 + 1, "선 위 더블클릭 → 점 +1")
+                pt = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect(), s = e.toScreen(e.sorted()[3]); return [r.left + s.x, r.top + s.y]; }""")
+                page.mouse.click(*pt, button="right")
+                check(page.evaluate("studio.editor.profile.points.length") == n0, "점 우클릭 → 점 -1")
+                abs0 = page.evaluate("studio.editor.profile.points.map(p => studio.editor.profile.axisX + p.r)")
+                ax = page.evaluate("""() => { const e = studio.editor, r = e.canvas.getBoundingClientRect(), pts = e.sorted();
+                    const y = (pts[0].y + pts.at(-1).y) / 2 * e.h + 40; return [r.left + e.profile.axisX * e.w, r.top + y]; }""")
+                page.mouse.move(*ax); page.mouse.down(); page.mouse.move(ax[0] - 12, ax[1], steps=4); page.mouse.up()
+                abs1 = page.evaluate("studio.editor.profile.points.map(p => studio.editor.profile.axisX + p.r)")
+                moved = page.evaluate("studio.editor.profile.axisX")
+                check(all(abs(a - b) < 1e-6 for a, b in zip(abs0, abs1)) and abs(moved - got["axisX"]) > 0.005,
+                      f"축 끌기 → 축만 이동({got['axisX']:.3f} → {moved:.3f}), 점은 사진 위 제자리")
+                page.click("#redo")
+
                 # 조명 왼쪽 → 오른쪽: 그림자 쪽이 바뀌는가 (저장 PNG 로 잰다)
                 shots = {}
                 for side, az in (("left", -70), ("right", 70)):

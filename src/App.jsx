@@ -17,7 +17,9 @@ import { Thumbnail } from '@astryxdesign/core/Thumbnail';
 import { FileInput } from '@astryxdesign/core/FileInput';
 import { Toolbar } from '@astryxdesign/core/Toolbar';
 import { Card } from '@astryxdesign/core/Card';
-import { Aperture, Download, RotateCcw } from 'lucide-react';
+import { TextArea } from '@astryxdesign/core/TextArea';
+import { ProgressBar } from '@astryxdesign/core/ProgressBar';
+import { Aperture, Clapperboard, Download, RotateCcw, Square } from 'lucide-react';
 import { studioTheme } from './theme.js';
 import { analyze, analysisSize, suggestCapSplit, DEFAULT_TOL } from './outline.js';
 import { Editor } from './editor.js';
@@ -28,6 +30,14 @@ import { resolveColor } from './tokens.js';
 const SAMPLES = [
   { src: '/samples/bottle_amber.png', name: '갈색 앰플' },
   { src: '/samples/bottle_white.png', name: '흰 로션병' },
+];
+// 연출 컷 장면 프리셋(지어낸 장면. 고정 지시 — 앵글·조명 유지, 브랜드 금지 — 는 서버가 붙인다)
+const SCENES = [
+  { key: 'limestone', name: '석회암 자연광', text: '따뜻한 베이지 석회암 바닥과 벽, 창으로 들어오는 부드러운 오후 자연광, 차분한 고급 화장품 광고' },
+  { key: 'marble', name: '대리석 스튜디오', text: '흰 대리석 받침과 연회색 스튜디오 배경, 깨끗한 소프트박스 조명, 미니멀한 제품 카탈로그 사진' },
+  { key: 'water', name: '물결 수면', text: '얕은 물 위에 놓인 제품, 잔잔한 물결과 물에 비친 반사, 맑고 시원한 여름 광고 느낌' },
+  { key: 'linen', name: '리넨과 그림자', text: '구겨진 크림색 리넨 천 위, 창살 모양 그림자가 비스듬히 지는 아침 햇살, 따뜻한 라이프스타일 사진' },
+  { key: 'night', name: '먹색 무드', text: '먹색 배경과 바닥, 제품 가장자리를 따라 흐르는 좁은 테두리 빛, 어둡고 고급스러운 향수 광고 느낌' },
 ];
 const SIZES = [{ value: '1080x1350', label: '1080 × 1350' }, { value: '2160x2700', label: '2160 × 2700' }];
 // 병에 입히는 색(제품 색이라 테마 토큰이 아니라 값 그대로 둔다)
@@ -90,6 +100,11 @@ export function App() {
   const [light, setLight] = useState({ ...LIGHTS.key, intensity: 2.4 });
   const [view, setView] = useState({ azimuth: 0, elevation: 0 });
   const [size, setSize] = useState('1080x1350');
+  const [sceneKey, setSceneKey] = useState(SCENES[0].key);
+  const [sceneText, setSceneText] = useState(SCENES[0].text);
+  const [shot, setShot] = useState(null);      // { id, state, elapsed, error }
+  const [mode, setMode] = useState('view');    // view: 3D / compare: 캡처 | 연출 컷
+  const pollTimer = useRef(0);
 
   const say = (text, bad = false) => setStatus({ text, bad });
   const font = () => getComputedStyle(document.body).fontFamily || 'sans-serif';
@@ -268,6 +283,55 @@ export function App() {
     say(`${w}×${h} PNG 로 저장했어요`);
   }
 
+  // ── 연출 컷: 캡처 → 로컬 서버 → Codex. 서버는 이 페이지에 끼워 준 토큰과 같은 주소에서 온 요청만 받는다
+  const token = () => document.querySelector('meta[name=studio-token]')?.content || '';
+  async function api(path, body) {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token() }, body: JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `서버 오류(${r.status})`);
+    return data;
+  }
+  function poll(id) {
+    clearTimeout(pollTimer.current);
+    pollTimer.current = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/shot/${id}`);
+        const info = await r.json();
+        setShot(info);
+        if (info.state === 'running') { poll(id); return; }
+        if (info.state === 'done') { setMode('compare'); say(`연출 컷이 나왔어요(${Math.round(info.elapsed)}초). 왼쪽이 넘긴 캡처, 오른쪽이 Codex 가 만든 사진이에요`); }
+        else if (info.state === 'cancelled') say('연출 컷 만들기를 취소했어요');
+        else say(info.error || '연출 컷을 만들지 못했어요', true);
+      } catch { poll(id); }
+    }, 1000);
+  }
+  async function makeShot() {
+    if (!S.profile) { say('먼저 사진을 넣어 주세요', true); return; }
+    const image = viewer.current.capture(1080, 1350);
+    if (!image) { say('캡처를 뜨지 못했어요. 3D 화면이 멈췄으면 새로고침해 주세요', true); return; }
+    try {
+      const info = await api('/api/shot', { image, scene: sceneText });
+      setShot(info);
+      say('Codex 에 캡처를 넘겼어요. 1분 남짓 걸려요');
+      poll(info.id);
+    } catch (e) { say(e.message, true); }
+  }
+  async function cancelShot() {
+    if (!shot) return;
+    try { await api(`/api/shot/${shot.id}/cancel`, {}); } catch (e) { say(e.message, true); }
+  }
+  async function saveShot() {
+    if (shot?.state !== 'done') return;
+    const blob = await (await fetch(`/api/shot/${shot.id}/image`)).blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `shot_${shot.id}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    say('연출 컷을 저장했어요');
+  }
+  useEffect(() => () => clearTimeout(pollTimer.current), []);
+
   const [W, H] = size.split('x');
 
   return (
@@ -336,9 +400,21 @@ export function App() {
                         height="fill"
                         content={
                           <LayoutContent padding={6}>
-                            <VStack height="100%" width="100%" hAlign="center" vAlign="center">
+                            <VStack height="100%" width="100%" hAlign="center" vAlign="center" style={mode === 'compare' ? { display: 'none' } : undefined} data-testid="view3d">
                               <canvas ref={viewCanvas} style={{ boxShadow: 'var(--shadow-high)', borderRadius: 'var(--radius-container)' }} />
                             </VStack>
+                            {mode === 'compare' && shot?.state === 'done' && (
+                              <HStack height="100%" width="100%" gap={4} hAlign="center" vAlign="center" data-testid="compare">
+                                {[['3D 캡처', `/api/shot/${shot.id}/capture`], [`연출 컷 · ${Math.round(shot.elapsed)}초`, `/api/shot/${shot.id}/image`]].map(([name, src]) => (
+                                  <VStack key={name} gap={2} width="45%" hAlign="center">
+                                    <Card padding={0} elevation="high" width="100%">
+                                      <AspectRatio ratio={4 / 5} fit="cover"><img src={src} alt={name} /></AspectRatio>
+                                    </Card>
+                                    <Text type="label" color="secondary">{name}</Text>
+                                  </VStack>
+                                ))}
+                              </HStack>
+                            )}
                           </LayoutContent>
                         }
                         footer={
@@ -347,15 +423,27 @@ export function App() {
                               label="앵글"
                               size="sm"
                               startContent={
-                                <SegmentedControl label="앵글" size="sm" value={cam} onChange={(k) => { setCam(k); viewer.current.setCamera(k); }}>
-                                  {Object.entries(CAMERAS).map(([k, c]) => <SegmentedControlItem key={k} value={k} label={c.name} />)}
-                                </SegmentedControl>
+                                <HStack gap={2} vAlign="center">
+                                  {shot?.state === 'done' && (
+                                    <SegmentedControl label="보기" size="sm" value={mode} onChange={setMode}>
+                                      <SegmentedControlItem value="view" label="3D" />
+                                      <SegmentedControlItem value="compare" label="비교" />
+                                    </SegmentedControl>
+                                  )}
+                                  {mode === 'view' && (
+                                    <SegmentedControl label="앵글" size="sm" value={cam} onChange={(k) => { setCam(k); viewer.current.setCamera(k); }}>
+                                      {Object.entries(CAMERAS).map(([k, c]) => <SegmentedControlItem key={k} value={k} label={c.name} />)}
+                                    </SegmentedControl>
+                                  )}
+                                </HStack>
                               }
-                              endContent={
+                              endContent={mode === 'compare' ? (
+                                <Button variant="secondary" size="sm" label="연출 컷 저장" icon={<Icon icon={Download} size="sm" />} onClick={saveShot} data-testid="shot-save" />
+                              ) : (
                                 <Text type="code" color="secondary" hasTabularNumbers data-testid="readout">
                                   {`카메라 ${view.azimuth}°/${view.elevation}° · 조명 ${Math.round(light.azimuth)}°/${Math.round(light.elevation)}° · ${W}×${H}`}
                                 </Text>
-                              }
+                              )}
                             />
                           </LayoutFooter>
                         }
@@ -426,6 +514,22 @@ export function App() {
                       <SegmentedControl label="받침" size="sm" layout="fill" value={pedestal} onChange={(k) => { setPedestal(k); viewer.current.setSet({ pedestal: k }); }}>
                         {Object.entries(PEDESTALS).map(([k, n]) => <SegmentedControlItem key={k} value={k} label={n} />)}
                       </SegmentedControl>
+                    </InspectorSection>
+                    <InspectorSection title="연출 컷">
+                      <Text type="supporting">지금 앵글·조명으로 캡처를 떠서 내 PC 의 Codex 에 넘기면, 구도는 그대로 두고 광고 사진으로 만들어 줘요(1분 남짓)</Text>
+                      <Selector label="장면" size="sm" options={SCENES.map((s) => ({ value: s.key, label: s.name }))} value={sceneKey}
+                        onChange={(k) => { setSceneKey(k); setSceneText(SCENES.find((s) => s.key === k).text); }} data-testid="scene" />
+                      <TextArea label="장면 설명" description="고쳐 써도 돼요. 앵글·조명 유지와 브랜드 금지는 앱이 알아서 붙여요"
+                        value={sceneText} onChange={(v) => setSceneText(v)} data-testid="scene-text" />
+                      {shot?.state === 'running' ? (
+                        <VStack gap={2}>
+                          <ProgressBar label={`Codex 가 만드는 중 · ${Math.round(shot.elapsed)}초`} isIndeterminate />
+                          <Button variant="secondary" size="sm" label="취소" icon={<Icon icon={Square} size="sm" />} onClick={cancelShot} data-testid="shot-cancel" />
+                        </VStack>
+                      ) : (
+                        <Button variant="primary" label="연출 컷 만들기" icon={<Icon icon={Clapperboard} size="sm" />}
+                          isDisabled={!loaded} onClick={makeShot} data-testid="shot" />
+                      )}
                     </InspectorSection>
                     <InspectorSection title="조명">
                       <HStack hAlign="center">

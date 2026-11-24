@@ -5,7 +5,9 @@ fails_when: 3초 안에 외곽선·3D 가 안 뜸 / 점을 끌어도 3D 모양�
             저장 PNG 크기가 고른 값과 다름·빈 화면 / 예시 사진 외곽선이 확인한 값에서 벗어남 / 실패 뒤 이전 병이 남음 / 조작 중 WebGL 이 죽음 / 외부 주소로 요청이 나감
 no_claim: 보기 좋은지(저장 PNG 는 out/ 에 남겨 눈으로 본다), 실제 GPU 브라우저 동작(헤드리스는 소프트웨어 렌더링)
 """
+import os
 import socket
+import tempfile
 import subprocess
 import sys
 import time
@@ -91,7 +93,10 @@ def check(cond, msg):
 def main():
     OUT.mkdir(exist_ok=True)
     port = free_port()
-    srv = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), str(port)], stdout=subprocess.PIPE)
+    # 연출 컷은 진짜 Codex 대신 가짜(tests/fake_codex.py)로: 1초 안에 1×1 그림을 돌려준다
+    fake_images = Path(tempfile.mkdtemp()) / "generated_images"
+    env = {**os.environ, "STUDIO_CODEX": str(ROOT / "tests" / "fake_codex.py"), "STUDIO_CODEX_IMAGES": str(fake_images)}
+    srv = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), str(port)], stdout=subprocess.PIPE, env=env)
     assert srv.stdout is not None
     srv.stdout.readline()  # 준비 줄
     origin = f"http://127.0.0.1:{port}"
@@ -228,6 +233,35 @@ def main():
                 check(page.evaluate("studio.viewer.bottle.visible"), "오류 뒤에도 다음 사진이 열림")
             except Exception as e:  # noqa: BLE001 — 시간 초과도 실패로 세고 끝까지 간다
                 check(False, f"오류 뒤 다음 사진 열기: {type(e).__name__}")
+
+            # 연출 컷: 버튼 → 진행 → 비교 보기(캡처 | 결과) → 저장 → 3D 로 돌아가기 / 취소
+            print("[연출 컷]")
+            fake_images.mkdir(parents=True, exist_ok=True)
+            (fake_images / "mode.txt").write_text("ok")
+            page.get_by_role("button", name="연출 컷 만들기").click()
+            page.wait_for_selector("[data-testid=compare]", timeout=15000)
+            loaded = page.evaluate("[...document.querySelectorAll('[data-testid=compare] img')].map(i => i.complete && i.naturalWidth > 0)")
+            check(loaded == [True, True], f"비교 보기에 캡처와 연출 컷 두 장({loaded})")
+            check(page.locator("[data-testid=compare]").is_visible() and not page.locator("[data-testid=view3d]").is_visible(),
+                  "비교 보기가 3D 자리에 실제로 보임(3D 는 숨김)")
+            cap = page.evaluate("document.querySelector('[data-testid=compare] img').naturalWidth")
+            check(cap == 1080, f"넘긴 캡처가 1080 폭({cap})")
+            prompt = (fake_images / "last_prompt.txt").read_text(encoding="utf-8")
+            check("석회암" in prompt and "그림자 방향을 그대로 유지" in prompt, "고른 장면 + 고정 지시가 Codex 로 감")
+            with page.expect_download() as dl:
+                page.click("[data-testid=shot-save]")
+            p_shot = OUT / "shot_fake.png"
+            dl.value.save_as(p_shot)
+            check(Image.open(p_shot).size == (1, 1), "연출 컷 저장 = 서버가 받은 그림 그대로")
+            page.get_by_role("radio", name="3D", exact=True).click()
+            check(page.locator("[data-testid=view3d]").is_visible() and page.locator("canvas").nth(1).bounding_box()["width"] > 300,
+                  "3D 로 돌아가면 3D 화면이 다시 제 크기로 보임")
+            (fake_images / "mode.txt").write_text("slow")
+            page.get_by_role("button", name="연출 컷 만들기").click()
+            page.wait_for_selector("[data-testid=shot-cancel]", timeout=5000)
+            page.click("[data-testid=shot-cancel]")
+            page.wait_for_function("() => document.querySelector('[data-testid=status]').textContent.includes('취소')", timeout=15000)
+            check(page.get_by_role("button", name="연출 컷 만들기").is_visible(), "취소하면 버튼이 돌아옴")
 
             check(not outside, f"외부 요청 {len(outside)}건 {outside[:3]}")
             check(not errors, f"페이지 오류 {errors[:3]}")

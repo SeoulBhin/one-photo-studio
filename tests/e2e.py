@@ -95,7 +95,8 @@ def main():
     port = free_port()
     # 연출 컷은 진짜 Codex 대신 가짜(tests/fake_codex.py)로: 1초 안에 1×1 그림을 돌려준다
     fake_images = Path(tempfile.mkdtemp()) / "generated_images"
-    env = {**os.environ, "STUDIO_CODEX": str(ROOT / "tests" / "fake_codex.py"), "STUDIO_CODEX_IMAGES": str(fake_images)}
+    env = {**os.environ, "STUDIO_CODEX": str(ROOT / "tests" / "fake_codex.py"), "STUDIO_CODEX_IMAGES": str(fake_images),
+           "STUDIO_OUT": str(fake_images.parent / "shots")}
     srv = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), str(port)], stdout=subprocess.PIPE, env=env)
     assert srv.stdout is not None
     srv.stdout.readline()  # 준비 줄
@@ -256,6 +257,15 @@ def main():
             page.get_by_role("radio", name="3D", exact=True).click()
             check(page.locator("[data-testid=view3d]").is_visible() and page.locator("canvas").nth(1).bounding_box()["width"] > 300,
                   "3D 로 돌아가면 3D 화면이 다시 제 크기로 보임")
+            # 비교 보기에서 다시 만들다 실패해도 가운데가 비지 않고 3D 가 보여야 한다(리뷰에서 찾은 버그)
+            (fake_images / "mode.txt").write_text("ok")
+            page.get_by_role("button", name="연출 컷 만들기").click()
+            page.wait_for_selector("[data-testid=compare]", timeout=15000)
+            (fake_images / "mode.txt").write_text("fail")
+            page.get_by_role("button", name="연출 컷 만들기").click()
+            page.wait_for_function("() => document.querySelector('[data-testid=status]').textContent.includes('실패')", timeout=15000)
+            check(page.locator("[data-testid=view3d]").is_visible() and not page.locator("[data-testid=compare]").is_visible(),
+                  "다시 만들다 실패해도 3D 가 보임(가운데가 비지 않음)")
             (fake_images / "mode.txt").write_text("slow")
             page.get_by_role("button", name="연출 컷 만들기").click()
             page.wait_for_selector("[data-testid=shot-cancel]", timeout=5000)

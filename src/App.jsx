@@ -104,7 +104,8 @@ export function App() {
   const [sceneText, setSceneText] = useState(SCENES[0].text);
   const [shot, setShot] = useState(null);      // { id, state, elapsed, error }
   const [mode, setMode] = useState('view');    // view: 3D / compare: 캡처 | 연출 컷
-  const pollTimer = useRef(0);
+  const pollTimer = useRef(0), pollFails = useRef(0), alive = useRef(true);
+  const [pending, setPending] = useState(false); // 요청 보내는 중(더블클릭으로 두 번 보내지 않게)
 
   const say = (text, bad = false) => setStatus({ text, bad });
   const font = () => getComputedStyle(document.body).fontFamily || 'sans-serif';
@@ -295,26 +296,37 @@ export function App() {
     clearTimeout(pollTimer.current);
     pollTimer.current = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/shot/${id}`);
+        const r = await fetch(`/api/shot/${id}`, { headers: { 'X-Studio-Token': token() } });
+        if (!r.ok) throw new Error(String(r.status));
         const info = await r.json();
+        if (!alive.current) return;
+        pollFails.current = 0;
         setShot(info);
         if (info.state === 'running') { poll(id); return; }
         if (info.state === 'done') { setMode('compare'); say(`연출 컷이 나왔어요(${Math.round(info.elapsed)}초). 왼쪽이 넘긴 캡처, 오른쪽이 Codex 가 만든 사진이에요`); }
         else if (info.state === 'cancelled') say('연출 컷 만들기를 취소했어요');
         else say(info.error || '연출 컷을 만들지 못했어요', true);
-      } catch { poll(id); }
+      } catch {
+        // 서버가 잠깐 안 받으면 다시 묻되, 30번(약 30초) 넘게 실패하면 멈추고 알린다
+        if (!alive.current) return;
+        if (++pollFails.current > 30) { say('서버와 연결이 끊겼어요. serve.py 가 켜져 있는지 확인해 주세요', true); return; }
+        poll(id);
+      }
     }, 1000);
   }
   async function makeShot() {
     if (!S.profile) { say('먼저 사진을 넣어 주세요', true); return; }
+    if (pending) return;
     const image = viewer.current.capture(1080, 1350);
     if (!image) { say('캡처를 뜨지 못했어요. 3D 화면이 멈췄으면 새로고침해 주세요', true); return; }
+    setPending(true);
     try {
       const info = await api('/api/shot', { image, scene: sceneText });
+      setMode('view'); // 새로 만드는 동안엔 3D 를 보여 준다(이전 결과의 비교 보기에 머물지 않게)
       setShot(info);
       say('Codex 에 캡처를 넘겼어요. 1분 남짓 걸려요');
       poll(info.id);
-    } catch (e) { say(e.message, true); }
+    } catch (e) { say(e.message, true); } finally { setPending(false); }
   }
   async function cancelShot() {
     if (!shot) return;
@@ -322,7 +334,9 @@ export function App() {
   }
   async function saveShot() {
     if (shot?.state !== 'done') return;
-    const blob = await (await fetch(`/api/shot/${shot.id}/image`)).blob();
+    const r = await fetch(`/api/shot/${shot.id}/image`, { headers: { 'X-Studio-Token': token() } });
+    if (!r.ok) { say('연출 컷 파일을 받지 못했어요', true); return; }
+    const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `shot_${shot.id}.png`;
@@ -330,7 +344,9 @@ export function App() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     say('연출 컷을 저장했어요');
   }
-  useEffect(() => () => clearTimeout(pollTimer.current), []);
+  useEffect(() => () => { alive.current = false; clearTimeout(pollTimer.current); }, []);
+  // 비교 보기는 결과가 다 됐을 때만. 다시 만드는 중이거나 실패하면 3D 로(가운데가 비지 않게)
+  const showCompare = mode === 'compare' && shot?.state === 'done';
 
   const [W, H] = size.split('x');
 
@@ -400,12 +416,12 @@ export function App() {
                         height="fill"
                         content={
                           <LayoutContent padding={6}>
-                            <VStack height="100%" width="100%" hAlign="center" vAlign="center" style={mode === 'compare' ? { display: 'none' } : undefined} data-testid="view3d">
+                            <VStack height="100%" width="100%" hAlign="center" vAlign="center" style={showCompare ? { display: 'none' } : undefined} data-testid="view3d">
                               <canvas ref={viewCanvas} style={{ boxShadow: 'var(--shadow-high)', borderRadius: 'var(--radius-container)' }} />
                             </VStack>
-                            {mode === 'compare' && shot?.state === 'done' && (
+                            {showCompare && (
                               <HStack height="100%" width="100%" gap={4} hAlign="center" vAlign="center" data-testid="compare">
-                                {[['3D 캡처', `/api/shot/${shot.id}/capture`], [`연출 컷 · ${Math.round(shot.elapsed)}초`, `/api/shot/${shot.id}/image`]].map(([name, src]) => (
+                                {[['3D 캡처', `/api/shot/${shot.id}/capture?t=${token()}`], [`연출 컷 · ${Math.round(shot.elapsed)}초`, `/api/shot/${shot.id}/image?t=${token()}`]].map(([name, src]) => (
                                   <VStack key={name} gap={2} width="45%" hAlign="center">
                                     <Card padding={0} elevation="high" width="100%">
                                       <AspectRatio ratio={4 / 5} fit="cover"><img src={src} alt={name} /></AspectRatio>
@@ -425,19 +441,19 @@ export function App() {
                               startContent={
                                 <HStack gap={2} vAlign="center">
                                   {shot?.state === 'done' && (
-                                    <SegmentedControl label="보기" size="sm" value={mode} onChange={setMode}>
+                                    <SegmentedControl label="보기" size="sm" value={showCompare ? 'compare' : 'view'} onChange={setMode}>
                                       <SegmentedControlItem value="view" label="3D" />
                                       <SegmentedControlItem value="compare" label="비교" />
                                     </SegmentedControl>
                                   )}
-                                  {mode === 'view' && (
+                                  {!showCompare && (
                                     <SegmentedControl label="앵글" size="sm" value={cam} onChange={(k) => { setCam(k); viewer.current.setCamera(k); }}>
                                       {Object.entries(CAMERAS).map(([k, c]) => <SegmentedControlItem key={k} value={k} label={c.name} />)}
                                     </SegmentedControl>
                                   )}
                                 </HStack>
                               }
-                              endContent={mode === 'compare' ? (
+                              endContent={showCompare ? (
                                 <Button variant="secondary" size="sm" label="연출 컷 저장" icon={<Icon icon={Download} size="sm" />} onClick={saveShot} data-testid="shot-save" />
                               ) : (
                                 <Text type="code" color="secondary" hasTabularNumbers data-testid="readout">
@@ -528,7 +544,7 @@ export function App() {
                         </VStack>
                       ) : (
                         <Button variant="primary" label="연출 컷 만들기" icon={<Icon icon={Clapperboard} size="sm" />}
-                          isDisabled={!loaded} onClick={makeShot} data-testid="shot" />
+                          isDisabled={!loaded || pending} onClick={makeShot} data-testid="shot" />
                       )}
                     </InspectorSection>
                     <InspectorSection title="조명">

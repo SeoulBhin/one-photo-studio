@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -73,9 +74,19 @@ def images_root():
     return home / "generated_images"
 
 
-def build_args(exe, job_dir):
-    return [*exe, "exec", "--skip-git-repo-check", "--ignore-user-config", "-s", "read-only", "--json",
-            "-C", str(job_dir), "-", "-i", str(job_dir / "capture.png")]
+# --ignore-user-config 는 내 설정 파일에 켜 둔 윈도 샌드박스 옵션까지 빼 버리므로 여기서 다시 켠다(리뷰에서 짚음).
+# 진짜 Codex 로 확인(11-25): 옵션 없이도 명령이 정책으로 거절됐고, 옵션을 켜면 명령이 돌아도 쓰기가 막혔다 — 두 겹
+SANDBOX = ["-c", "features.experimental_windows_sandbox=true", "-c", "features.elevated_windows_sandbox=true"]
+
+
+def work_dir(job_id):
+    """Codex 가 일하는 폴더. 저장소 밖(임시 폴더)에 둬서 저장소의 AGENTS.md 같은 지시 파일을 읽지 않게 한다"""
+    return Path(tempfile.gettempdir()) / "one-photo-studio-codex" / job_id
+
+
+def build_args(exe, work):
+    return [*exe, "exec", "--skip-git-repo-check", "--ignore-user-config", "-s", "read-only", *SANDBOX, "--json",
+            "-C", str(work), "-", "-i", str(work / "capture.png")]
 
 
 def find_result(thread_id, since):
@@ -113,7 +124,7 @@ class Job:
         self.id, self.dir, self.scene = job_id, folder, scene
         self.state, self.error, self.thread_id = "running", None, None
         self.started, self.ended = time.time(), None
-        self.proc, self.cancelled = None, False
+        self.proc, self.cancelled, self.timed_out = None, False, False
 
     def info(self):
         end = self.ended or time.time()
@@ -142,59 +153,79 @@ class Shots:
             (folder / "capture.png").write_bytes(png)
             job = Job(job_id, folder, scene)
             self.jobs[job_id] = self.current = job
+            self._prune(keep=20)
         threading.Thread(target=self._run, args=(job, exe), daemon=True).start()
         return job
 
     def _run(self, job, exe):
+        # 어떤 예외가 나도 작업이 "진행 중"으로 멈춰 있지 않게 끝에서 반드시 상태를 정한다
+        # (리뷰에서 재현: Codex 가 먼저 꺼지면 표준입력 쓰기가 OSError 를 내고 스레드가 죽어 이후 요청이 모두 409)
+        proc = None
         try:
-            job.proc = subprocess.Popen(build_args(exe, job.dir), cwd=job.dir, stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except OSError as e:
+            work = work_dir(job.id)
+            work.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(job.dir / "capture.png", work / "capture.png")
+            proc = job.proc = subprocess.Popen(build_args(exe, work), cwd=work, stdin=subprocess.PIPE,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            timer = threading.Timer(self.timeout, lambda: self._timeout(job))
+            timer.start()
+            assert proc.stdin and proc.stdout and proc.stderr
+            if job.cancelled:            # 시작 직전에 취소가 들어온 경우
+                kill_tree(proc)
+            try:
+                proc.stdin.write(build_prompt(job.scene).encode("utf-8"))
+                proc.stdin.close()
+            except OSError:              # 이미 꺼진 Codex(잘못된 옵션·로그인 오류·취소) — 종료 코드로 판단
+                pass
+            err = []
+            reader = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+            reader.start()
+            with open(job.dir / "codex.jsonl", "wb") as log:
+                for line in proc.stdout:
+                    log.write(line)
+                    if job.thread_id is None:
+                        try:
+                            ev = json.loads(line)
+                            if isinstance(ev, dict) and ev.get("type") == "thread.started":
+                                job.thread_id = ev.get("thread_id")
+                        except ValueError:
+                            pass
+            code = proc.wait()
+            timer.cancel()
+            reader.join(timeout=5)
+            stderr = (err[0] if err else b"").decode("utf-8", "replace")
+            (job.dir / "codex.stderr.txt").write_text(stderr, encoding="utf-8")
+            with self.lock:              # 취소·시간 초과 표시는 잠금 안에서 읽는다
+                cancelled, timed_out = job.cancelled, job.timed_out
+            if timed_out:
+                limit = f"{self.timeout // 60}분" if self.timeout >= 60 else f"{self.timeout}초"
+                self._finish(job, "error", f"{limit} 안에 끝나지 않아 멈췄어요")
+            elif cancelled:
+                self._finish(job, "cancelled", None)
+            elif code != 0:
+                self._finish(job, "error", human_error(stderr, code))
+            else:
+                png = find_result(job.thread_id, job.started)
+                if not png:
+                    self._finish(job, "error", "Codex 가 그림을 만들지 않았어요. 장면 글을 바꿔 다시 해 보세요")
+                else:
+                    shutil.copyfile(png, job.dir / "shot.png")
+                    self._finish(job, "done", None)
+        except Exception as e:  # noqa: BLE001 — 무슨 일이 있어도 작업은 끝낸다
+            if proc:
+                kill_tree(proc)
             self._finish(job, "error", f"Codex 를 실행하지 못했어요: {e}")
-            return
-        proc = job.proc
-        assert proc.stdin and proc.stdout and proc.stderr
-        if job.cancelled:                # 시작 직전에 취소가 들어온 경우
-            kill_tree(proc)
-        proc.stdin.write(build_prompt(job.scene).encode("utf-8"))
-        proc.stdin.close()
-        err = []
-        threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True).start()
-        timer = threading.Timer(self.timeout, lambda: self._timeout(job))
-        timer.start()
-        with open(job.dir / "codex.jsonl", "wb") as log:
-            for line in proc.stdout:
-                log.write(line)
-                if job.thread_id is None:
-                    try:
-                        ev = json.loads(line)
-                        if ev.get("type") == "thread.started":
-                            job.thread_id = ev.get("thread_id")
-                    except ValueError:
-                        pass
-        code = proc.wait()
-        timer.cancel()
-        if job.state != "running":       # 시간 초과로 이미 끝냄
-            return
-        if job.cancelled:
-            self._finish(job, "cancelled", None)
-            return
-        stderr = (err[0] if err else b"").decode("utf-8", "replace")
-        (job.dir / "codex.stderr.txt").write_text(stderr, encoding="utf-8")
-        if code != 0:
-            self._finish(job, "error", human_error(stderr, code))
-            return
-        png = find_result(job.thread_id, job.started)
-        if not png:
-            self._finish(job, "error", "Codex 가 그림을 만들지 않았어요. 장면 글을 바꿔 다시 해 보세요")
-            return
-        shutil.copyfile(png, job.dir / "shot.png")
-        self._finish(job, "done", None)
 
     def _timeout(self, job):
-        if job.state == "running" and job.proc:
+        with self.lock:
+            if job.state != "running" or job.cancelled:
+                return
+            job.timed_out = True
+        if job.proc:
             kill_tree(job.proc)
-            self._finish(job, "error", f"{self.timeout // 60}분 안에 끝나지 않아 멈췄어요")
+        # Codex 가 남긴 자식 프로세스가 출력을 붙잡고 있으면 _run 이 안 끝날 수 있어 여기서 확정한다(리뷰에서 재현)
+        limit = f"{self.timeout // 60}분" if self.timeout >= 60 else f"{self.timeout}초"
+        self._finish(job, "error", f"{limit} 안에 끝나지 않아 멈췄어요")
 
     def _finish(self, job, state, error):
         with self.lock:
@@ -204,12 +235,24 @@ class Shots:
 
     def cancel(self, job_id):
         job = self.jobs.get(job_id)
-        if not job or job.state != "running":
-            return False
-        job.cancelled = True
+        with self.lock:
+            if not job or job.state != "running":
+                return False
+            job.cancelled = True
         if job.proc:
             kill_tree(job.proc)
+        self._finish(job, "cancelled", None)  # 화면엔 바로 취소로. 남은 정리는 _run 이 마저 한다
         return True
+
+    def _prune(self, keep):
+        """최근 작업 keep 개만 남긴다(캡처가 장당 1~3MB 라 계속 쌓이지 않게)"""
+        old = sorted(p for p in self.out.iterdir() if p.is_dir())[:-keep]
+        for p in old:
+            if p.name in self.jobs and self.jobs[p.name].state == "running":
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+            shutil.rmtree(work_dir(p.name), ignore_errors=True)
+            self.jobs.pop(p.name, None)
 
     def get(self, job_id):
         return self.jobs.get(job_id) if re.fullmatch(r"[0-9_a-f]{8,40}", job_id or "") else None

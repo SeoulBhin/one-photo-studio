@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+import shot  # noqa: E402
 ONE_PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
 PNG = "data:image/png;base64," + ONE_PX
 
@@ -38,7 +40,8 @@ class ServerTest(unittest.TestCase):
         cls.images = Path(cls.tmp.name) / "generated_images"
         cls.port = free_port()
         env = {**os.environ, "STUDIO_CODEX": str(ROOT / "tests" / "fake_codex.py"),
-               "STUDIO_CODEX_IMAGES": str(cls.images), "PYTHONUTF8": "1"}
+               "STUDIO_CODEX_IMAGES": str(cls.images), "PYTHONUTF8": "1", "STUDIO_SHOT_TIMEOUT": "6",
+               "STUDIO_OUT": str(Path(cls.tmp.name) / "shots")}
         cls.srv = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), str(cls.port)], env=env, stdout=subprocess.PIPE)
         assert cls.srv.stdout
         cls.srv.stdout.readline()
@@ -78,10 +81,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 202, body)
         return json.loads(body)["id"]
 
+    def setUp(self):
+        # 앞 시험이 남긴 작업이 돌고 있으면 끝날 때까지 기다린다(한 실패가 뒤 시험을 409 로 줄줄이 무너뜨리지 않게)
+        for _ in range(100):
+            if not any(j.get("state") == "running" for j in self._running()):
+                return
+            time.sleep(0.1)
+
+    def _running(self):
+        shots = Path(self.tmp.name) / "shots"
+        out = []
+        for d in shots.glob("*") if shots.exists() else []:
+            status, body = self.req("GET", f"/api/shot/{d.name}", headers={"X-Studio-Token": self.token})
+            if status == 200:
+                out.append(json.loads(body))
+        return out
+
     def wait(self, job_id, limit=20):
         t = time.time()
         while time.time() - t < limit:
-            info = json.loads(self.req("GET", f"/api/shot/{job_id}")[1])
+            info = json.loads(self.req("GET", f"/api/shot/{job_id}", headers={"X-Studio-Token": self.token})[1])
             if info["state"] != "running":
                 return info
             time.sleep(0.2)
@@ -120,14 +139,20 @@ class ServerTest(unittest.TestCase):
         self.assertIn(scene, prompt, "장면 글이 글자 그대로 가야 함")
         self.assertIn("그림자 방향을 그대로 유지", prompt)
         args = json.loads((self.images / "last_args.json").read_text(encoding="utf-8"))
-        for flag in ("--ignore-user-config", "--skip-git-repo-check", "--json"):
-            self.assertIn(flag, args)
-        self.assertEqual(args[args.index("-s") + 1], "read-only")
-        self.assertLess(args.index("-"), args.index("-i"), "프롬프트(표준입력 '-')가 -i 앞")
-        status, png = self.req("GET", f"/api/shot/{info['id']}/image")
+        job_dir = Path(self.tmp.name) / "shots" / info["id"]
+        work = shot.work_dir(info["id"])
+        # 옵션 전체를 그대로 비교한다: 샌드박스 우회 같은 옵션이 끼어들면 바로 실패
+        self.assertEqual(args, ["exec", "--skip-git-repo-check", "--ignore-user-config", "-s", "read-only",
+                                "-c", "features.experimental_windows_sandbox=true", "-c", "features.elevated_windows_sandbox=true",
+                                "--json", "-C", str(work), "-", "-i", str(work / "capture.png")])
+        self.assertNotIn(str(ROOT), str(work), "Codex 작업 폴더는 저장소 밖(AGENTS.md 안 읽게)")
+        self.assertTrue((job_dir / "codex.jsonl").exists() and (job_dir / "capture.png").exists())
+        self.assertEqual(self.req("GET", f"/api/shot/{info['id']}/image")[0], 403, "토큰 없이 결과 조회 막힘")
+        self.assertEqual(self.req("GET", f"/api/shot/{info['id']}")[0], 403, "토큰 없이 상태 조회 막힘")
+        status, png = self.req("GET", f"/api/shot/{info['id']}/image?t={self.token}")
         self.assertEqual(status, 200)
         self.assertTrue(png.startswith(b"\x89PNG"))
-        self.assertEqual(self.req("GET", f"/api/shot/{info['id']}/capture")[0], 200)
+        self.assertEqual(self.req("GET", f"/api/shot/{info['id']}/capture?t={self.token}")[0], 200)
 
     def test_03_other_folders_are_ignored(self):
         # Codex 를 따로 돌려 생긴 다른 작업 폴더의 그림은 집으면 안 된다
@@ -151,16 +176,30 @@ class ServerTest(unittest.TestCase):
         self.assertLess(time.time() - t, 15)
 
     def test_05_failures_in_plain_words(self):
-        for m, words in (("fail", "실패했어요"), ("login", "로그인")):
+        for m, words in (("fail", "something broke"), ("login", "로그인")):
             with self.subTest(m):
                 self.mode(m)
                 info = self.wait(self.start())
                 self.assertEqual(info["state"], "error")
                 self.assertIn(words, info["error"])
 
-    def test_06_static_rules_kept(self):
+    def test_06_early_exit_does_not_hang(self):
+        # Codex 가 프롬프트를 받기도 전에 꺼져도 작업이 "진행 중"으로 멈추지 않고, 다음 요청을 받는다
+        self.mode("early")
+        info = self.wait(self.start(), limit=10)
+        self.assertEqual(info["state"], "error")
+        self.mode("ok")
+        self.assertEqual(self.wait(self.start())["state"], "done", "다음 요청이 409 로 막히면 안 됨")
+
+    def test_07_timeout(self):
+        self.mode("slow")
+        info = self.wait(self.start(), limit=20)
+        self.assertEqual(info["state"], "error")
+        self.assertIn("안에 끝나지 않아", info["error"])
+
+    def test_08_static_rules_kept(self):
         self.assertEqual(self.req("GET", "/serve.py")[0], 404)
-        self.assertEqual(self.req("GET", "/api/shot/zzz")[0], 404)
+        self.assertEqual(self.req("GET", "/api/shot/zzz")[0], 403, "토큰 없이는 무엇도 안 알려 줌")
         self.assertEqual(self.req("GET", "/", host="attacker.example")[0], 403)
 
 

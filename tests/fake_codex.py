@@ -8,6 +8,8 @@ from pathlib import Path
 root = Path(os.environ["STUDIO_CODEX_IMAGES"])
 mode_file = root / "mode.txt"  # 시험이 서버를 다시 켜지 않고 모드를 바꾸게 파일로
 mode = mode_file.read_text().strip() if mode_file.exists() else os.environ.get("FAKE_CODEX_MODE", "ok")
+if mode == "early":  # 프롬프트를 읽기도 전에 꺼짐(잘못된 옵션·로그인 오류 흉내)
+    sys.exit(2)
 prompt = sys.stdin.buffer.read().decode("utf-8")
 root.mkdir(parents=True, exist_ok=True)
 (root / "last_prompt.txt").write_text(prompt, encoding="utf-8")

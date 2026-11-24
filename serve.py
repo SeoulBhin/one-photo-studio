@@ -9,6 +9,7 @@ Codex 를 부르는 요청은 다른 웹페이지가 흉내 낼 수 없게 네 �
 import functools
 import http.server
 import json
+import os
 import re
 import secrets
 import sys
@@ -18,12 +19,12 @@ from shot import Busy, CodexMissing, Shots, decode_png
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-OUT = ROOT / "out" / "shots"
+OUT = Path(os.environ.get("STUDIO_OUT") or ROOT / "out" / "shots")  # 시험은 임시 폴더로
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8411
 TOKEN = secrets.token_urlsafe(24)
 MAX_BODY = 20 * 1024 * 1024
 STATIC = ("/assets/", "/samples/")
-SHOTS = Shots(OUT)
+SHOTS = Shots(OUT, timeout=int(os.environ.get("STUDIO_SHOT_TIMEOUT", "300")))  # 시험에선 짧게
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -33,6 +34,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2",
     }
+
+    timeout = 30  # 반쯤 보내고 멈춘 연결이 스레드를 계속 붙잡지 않게
 
     def host_ok(self):
         # 다른 사이트가 DNS 를 바꿔치기해 이 서버를 읽는 걸 막는다
@@ -73,6 +76,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
     def api_get(self, path):
+        # 결과·캡처 조회에도 토큰(머리글, 또는 이미지 주소의 ?t=)
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+        given = self.headers.get("X-Studio-Token") or params.get("t", "")
+        if not secrets.compare_digest(given, TOKEN):
+            self.json(403, {"error": "토큰이 맞지 않아요"})
+            return
         m = re.fullmatch(r"/api/shot/([0-9_a-f]+)(/image|/capture)?", path)
         job = SHOTS.get(m.group(1)) if m else None
         if not m or not job:

@@ -37,10 +37,10 @@ $ python serve.py
 
 오른쪽 아래 "연출 컷"에서 장면을 고르고(석회암 자연광, 대리석 스튜디오, 물결 수면, 리넨과 그림자, 먹색 무드) 설명을 고친 뒤 [연출 컷 만들기]를 누르면, 지금 앵글·조명으로 뜬 1080×1350 캡처를 로컬 서버가 내 PC 의 Codex CLI 에 넘긴다. 1분 남짓 뒤 가운데가 "3D 캡처 | 연출 컷" 비교 보기로 바뀌고 [연출 컷 저장]으로 받는다. 결과와 캡처, Codex 기록은 `out/shots/<작업>/` 에 남는다(저장소엔 안 올림).
 
-- Codex 는 `codex exec --ignore-user-config -s read-only --json - -i capture.png` 로 부른다. 내 설정 파일을 안 읽어 MCP 연결이 빠지고, 읽기 전용이라 파일을 쓰거나 명령을 실행하지 못한다. 그림 생성만 한다
+- Codex 는 `codex exec --ignore-user-config -s read-only -c features.experimental_windows_sandbox=true -c features.elevated_windows_sandbox=true --json - -i capture.png` 로, 저장소 밖 임시 폴더에서 부른다. 내 설정 파일을 안 읽어 MCP 연결이 빠지고, 읽기 전용 + 윈도 샌드박스라 파일을 쓰거나 명령을 실행하지 못한다(진짜 Codex 로 "파일을 써 봐라"를 시켜 막히는 것 확인). 그림 생성만 한다
 - 프롬프트는 명령줄이 아니라 표준입력으로 넘긴다(윈도의 codex.CMD 는 인자가 cmd.exe 를 거쳐 `&`, `|`, `%` 가 해석될 수 있다)
 - 결과는 Codex 의 생성 폴더 중 이번 작업 번호(`thread_id`) 폴더에서만 찾는다. 따로 돌린 다른 Codex 작업의 그림을 집지 않는다
-- 이 요청은 Host·Origin·JSON·실행마다 바뀌는 토큰(이 앱 페이지에만 끼워 줌) 네 가지를 다 맞춰야 받는다. 다른 웹페이지가 내 PC 의 Codex 를 돌리지 못하게 하려는 것. 한 번에 하나, 5분 제한, 취소 가능
+- 이 요청은 Host·Origin·JSON·실행마다 바뀌는 토큰(이 앱 페이지에만 끼워 줌) 네 가지를 다 맞춰야 받는다. 다른 웹페이지가 내 PC 의 Codex 를 돌리지 못하게 하려는 것. 한 번에 하나, 5분 제한, 취소 가능, 결과 조회에도 토큰. 다만 같은 PC 에서 도는 다른 프로그램(브라우저 밖)은 첫 페이지를 받아 토큰을 얻을 수 있다 — 혼자 쓰는 내 PC 시연용이라 받아들인 한계
 
 ## 외곽선을 따는 방법
 
@@ -57,7 +57,7 @@ $ python serve.py
 
 ```bash
 $ node --test tests/outline.test.mjs   # 합성 이미지 12건: 반지름·턱·흰 병·그림자·라벨·얼룩·튀는 줄·실패·3D 점 목록·뚜껑 경계
-$ python -m unittest tests/test_server.py # 연출 컷 서버 6건(가짜 Codex): 막아야 할 요청 10종, 특수 문자, 인자, 다른 폴더 그림 무시, 409·취소, 실패 문구
+$ python -m unittest tests/test_server.py tests/test_shot.py # 연출 컷 서버 8건 + 작업 관리 1건(가짜 Codex): 막아야 할 요청 10종, 특수 문자, 인자, 다른 폴더 그림 무시, 409·취소, 실패 문구
 $ npm run build && python tests/e2e.py # 헤드리스 크로미움 60항목(연출 컷은 가짜 Codex): 예시 2장으로 사진→편집(끌기·추가·삭제·축)→덧입히기→조명→저장, 실패 처리, 외부 요청 0건
 ```
 

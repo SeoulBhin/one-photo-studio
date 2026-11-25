@@ -220,3 +220,35 @@ export function suggestCapSplit(profile) {
   while (neck > 0 && Math.abs(pts[neck - 1].r - pts[neck].r) < 0.002) neck--;
   return pts[neck].y;
 }
+
+// ── 상자: 앞면 사각형(사진 비율 좌표). 병과 같은 방법으로 줄마다 양 끝을 잡고,
+// 위·아래는 첫·끝 줄, 좌·우는 줄 끝의 중앙값(그림자·글자에 흔들리지 않게).
+export function boxFromImage(rgba, w, h, { tol = DEFAULT_TOL } = {}) {
+  const res = analyze(rgba, w, h, { tol });
+  const rows = res.rows || [];
+  if (res.reason === 'small' || res.reason === 'large' || rows.length < 8) return { rect: null, reason: res.reason || 'edge' };
+  const left = median(rows.map((r) => r.l)), right = median(rows.map((r) => r.r)) + 1;
+  if (right - left < w * 0.05) return { rect: null, reason: 'edge' };
+  return {
+    rect: { left: left / w, right: right / w, top: rows[0].y / h, bottom: (rows[rows.length - 1].y + 1) / h },
+    reason: null,
+  };
+}
+
+// 상자 옆면에 칠할 색: 앞면 테두리 안쪽 띠(가장자리에서 3~10%)의 중앙값. 가운데 글자·무늬는 피한다
+export function edgeColor(rgba, w, h, rect) {
+  const L = rect.left * w, R = rect.right * w, T = rect.top * h, B = rect.bottom * h;
+  const bw = (R - L) * 0.07, bh = (B - T) * 0.07, ow = (R - L) * 0.03, oh = (B - T) * 0.03;
+  const ch = [[], [], []];
+  for (let y = Math.round(T + oh); y < B - oh; y += 2) {
+    for (let x = Math.round(L + ow); x < R - ow; x += 2) {
+      const inBand = x < L + ow + bw || x > R - ow - bw || y < T + oh + bh || y > B - oh - bh;
+      if (!inBand) continue;
+      const i = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) ch[c].push(rgba[i + c]);
+    }
+  }
+  if (!ch[0].length) return null; // 사각형이 너무 작아 띠가 없다 → 부르는 쪽이 기본색을 쓴다
+  const hex = (v) => Math.round(v).toString(16).padStart(2, '0');
+  return '#' + ch.map((a) => hex(median(a))).join('');
+}

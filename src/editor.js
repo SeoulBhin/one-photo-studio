@@ -9,10 +9,13 @@ const HIT = 9;     // 점을 잡는 반경(px)
 const MIN_POINTS = 3;
 
 export class Editor {
-  constructor(canvas, onChange) {
+  constructor(canvas, onChange, onBoxChange) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.onChange = onChange;
+    this.onBoxChange = onBoxChange;
+    this.mode = 'bottle';   // 'bottle': 옆선 점 / 'box': 앞면 사각형
+    this.rect = null;       // 상자 앞면 { left, right, top, bottom } 사진 비율
     this.image = null;
     this.profile = null;
     this.drag = null;
@@ -28,6 +31,7 @@ export class Editor {
   }
 
   set(image, profile, capY = null) {
+    this.mode = 'bottle';
     this.image = image;
     this.profile = profile && { ...profile, points: profile.points.map(p => ({ ...p })) };
     this.capY = capY;
@@ -35,6 +39,43 @@ export class Editor {
   }
 
   setLabel(label) { this.label = label; this.draw(); }
+
+  // 상자 모드: 사진 위에 앞면 사각형. 모서리를 끌면 두 변이, 변을 끌면 그 변이 움직인다
+  setBox(image, rect) {
+    this.mode = 'box';
+    this.image = image;
+    this.profile = null;
+    this.rect = rect && { ...rect };
+    this.fit();
+  }
+
+  drawBox() {
+    const { ctx, w, h } = this, r = this.rect;
+    const L = r.left * w, R = r.right * w, T = r.top * h, B = r.bottom * h;
+    ctx.save();
+    ctx.fillStyle = SHADE;
+    ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.rect(L, T, R - L, B - T); ctx.fill('evenodd');
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.strokeRect(L + 0.5, T + 0.5, R - L - 1, B - T - 1);
+    for (const [x, y] of [[L, T], [R, T], [L, B], [R, B]]) {
+      ctx.beginPath(); ctx.rect(x - 4.5, y - 4.5, 9, 9);
+      ctx.fillStyle = 'white'; ctx.fill(); ctx.strokeStyle = INK; ctx.stroke();
+    }
+    ctx.restore();
+    tag(ctx, '앞면', R + 6, T + 2, 'left', ACC);
+  }
+
+  // 마우스 위치가 사각형의 어느 손잡이에 걸리는지: 'lt' 'rb' 처럼 변 이름 묶음, 없으면 null
+  boxHandle(m) {
+    const r = this.rect, w = this.w, h = this.h, near = 7;
+    const L = r.left * w, R = r.right * w, T = r.top * h, B = r.bottom * h;
+    const inY = m.y > T - near && m.y < B + near, inX = m.x > L - near && m.x < R + near;
+    let k = '';
+    if (inY && Math.abs(m.x - L) < near) k += 'l';
+    if (inY && Math.abs(m.x - R) < near) k += 'r';
+    if (inX && Math.abs(m.y - T) < near) k += 't';
+    if (inX && Math.abs(m.y - B) < near) k += 'b';
+    return k || null;
+  }
 
   // 테마 토큰(글자색·강조색·바탕·글꼴)을 캔버스에 쓸 값으로
   setColors({ ink, accent, shade, font }) {
@@ -70,6 +111,7 @@ export class Editor {
     ctx.clearRect(0, 0, w, h);
     if (!this.image) return;
     ctx.drawImage(this.image, 0, 0, w, h);
+    if (this.mode === 'box') { if (this.rect) this.drawBox(); return; }
     if (!this.profile) return;
     const pts = this.sorted();
     const ax = this.profile.axisX * w;
@@ -138,7 +180,16 @@ export class Editor {
   }
 
   down(e) {
-    if (!this.profile || e.button !== 0) return;
+    if (e.button !== 0) return;
+    if (this.mode === 'box') {
+      if (!this.rect) return;
+      const k = this.boxHandle(this.local(e));
+      if (!k) return;
+      this.drag = { box: k };
+      this.canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (!this.profile) return;
     const m = this.local(e);
     const point = this.nearest(m);
     if (point) this.drag = { point };
@@ -150,6 +201,7 @@ export class Editor {
   }
 
   move(e) {
+    if (this.mode === 'box') { this.moveBox(e); return; }
     if (!this.profile) return;
     const m = this.local(e);
     if (!this.drag) {
@@ -174,6 +226,25 @@ export class Editor {
     this.emit();
   }
 
+  moveBox(e) {
+    if (!this.rect) return;
+    const m = this.local(e);
+    if (!this.drag?.box) {
+      const k = this.boxHandle(m);
+      this.canvas.style.cursor = !k ? 'default' : k.length === 2 ? (k === 'lt' || k === 'rb' ? 'nwse-resize' : 'nesw-resize') : /[lr]/.test(k) ? 'ew-resize' : 'ns-resize';
+      return;
+    }
+    const r = this.rect, x = clamp(m.x / this.w, 0, 1), y = clamp(m.y / this.h, 0, 1), min = 0.03;
+    for (const c of this.drag.box) {
+      if (c === 'l') r.left = Math.min(x, r.right - min);
+      if (c === 'r') r.right = Math.max(x, r.left + min);
+      if (c === 't') r.top = Math.min(y, r.bottom - min);
+      if (c === 'b') r.bottom = Math.max(y, r.top + min);
+    }
+    this.draw();
+    this.onBoxChange?.({ ...r });
+  }
+
   up(e) {
     if (!this.drag) return;
     this.drag = null;
@@ -183,7 +254,7 @@ export class Editor {
 
   // 오른쪽 선 위를 더블클릭하면 그 자리에 점을 끼운다
   add(e) {
-    if (!this.profile) return;
+    if (this.mode === 'box' || !this.profile) return;
     const m = this.local(e);
     if (this.nearest(m)) return; // 점 위 더블클릭은 추가가 아니다
     const pts = this.sorted();
@@ -200,7 +271,7 @@ export class Editor {
   }
 
   remove(e) {
-    if (!this.profile || this.profile.points.length <= MIN_POINTS) return;
+    if (this.mode === 'box' || !this.profile || this.profile.points.length <= MIN_POINTS) return;
     const p = this.nearest(this.local(e));
     if (!p) return;
     this.profile.points.splice(this.profile.points.indexOf(p), 1);

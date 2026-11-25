@@ -155,3 +155,16 @@ test('뚜껑 경계: 스포이트 병은 고무 꼭지 밑이 아니라 칼라 �
   const y = suggestCapSplit(profile) * H;
   assert.ok(y > 80 + 0.3 * 340 - 6 && y < 80 + 0.36 * 340, `경계 ${y.toFixed(0)}px (칼라 밑 ${80 + 0.3 * 340}px 근처여야)`);
 });
+
+test('상자: 앞면 사각형이 그린 대로(바닥 그림자 빼고), 옆면 색은 테두리 띠 색', async () => {
+  const { boxFromImage, edgeColor } = await import('../src/outline.js');
+  // 폭 120(반지름 60)·높이 340 의 갈색 사각형 + 가운데 흰 글자 띠 + 바닥 그림자
+  const img = draw({ radius: () => 60, shadow: true, extra: (x, y) => false, label: { from: 0.45, to: 0.55, color: [250, 250, 250] } });
+  const { rect } = boxFromImage(img, W, H);
+  assert.ok(rect, '사각형을 못 찾음');
+  assert.ok(Math.abs(rect.left * W - 140) <= 2 && Math.abs(rect.right * W - 260) <= 2, `좌우 ${rect.left * W} ${rect.right * W}`);
+  assert.ok(Math.abs(rect.top * H - 80) <= 2 && Math.abs(rect.bottom * H - 420) <= 3, `위아래 ${rect.top * H} ${rect.bottom * H}`);
+  assert.equal(edgeColor(img, W, H, rect), '#783c14', '글자 띠가 아니라 몸통 색(120,60,20)');
+  const empty = boxFromImage(draw({ radius: () => 0 }), W, H);
+  assert.equal(empty.rect, null);
+});

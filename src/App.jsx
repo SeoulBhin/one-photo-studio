@@ -19,18 +19,25 @@ import { Toolbar } from '@astryxdesign/core/Toolbar';
 import { Card } from '@astryxdesign/core/Card';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
-import { Aperture, Clapperboard, Download, RotateCcw, Square } from 'lucide-react';
+import { Aperture, Box, Clapperboard, Download, RotateCcw, Square } from 'lucide-react';
+import { zipSync, strToU8 } from 'fflate';
 import { studioTheme } from './theme.js';
-import { analyze, analysisSize, suggestCapSplit, DEFAULT_TOL } from './outline.js';
+import { analyze, analysisSize, suggestCapSplit, boxFromImage, edgeColor, DEFAULT_TOL } from './outline.js';
 import { Editor } from './editor.js';
 import { Viewer, FINISHES, BACKDROPS, PEDESTALS, CAMERAS, LIGHTS } from './viewer.js';
 import { LightPad } from './LightPad.jsx';
 import { resolveColor } from './tokens.js';
 
-const SAMPLES = [
-  { src: '/samples/bottle_amber.png', name: '갈색 앰플' },
-  { src: '/samples/bottle_white.png', name: '흰 로션병' },
-];
+const SAMPLES = {
+  bottle: [
+    { src: '/samples/bottle_amber.png', name: '갈색 앰플' },
+    { src: '/samples/bottle_white.png', name: '흰 로션병' },
+  ],
+  box: [
+    { src: '/samples/box_cream.png', name: '크림 상자' },
+    { src: '/samples/box_navy.png', name: '남색 상자' },
+  ],
+};
 // 연출 컷 장면 프리셋(지어낸 장면. 고정 지시 — 앵글·조명 유지, 브랜드 금지 — 는 서버가 붙인다)
 const SCENES = [
   { key: 'limestone', name: '석회암 자연광', text: '따뜻한 베이지 석회암 바닥과 벽, 창으로 들어오는 부드러운 오후 자연광, 차분한 고급 화장품 광고' },
@@ -82,13 +89,23 @@ export function App() {
   const viewCanvas = useRef(null), editCanvas = useRef(null);
   const viewer = useRef(null), editor = useRef(null);
   const S = useRef({ image: null, source: null, aspect: 1, profile: null, capY: null, name: '' }).current;
-  const loadSeq = useRef(0);
+  // 상자: 사진 + 앞면 사각형(사진 비율 좌표)
+  const SB = useRef({ image: null, source: null, aspect: 1, rect: null, name: '', userColor: false }).current;
+  const loadSeq = useRef({ bottle: 0, box: 0 }); // 제품마다 따로: 병을 여는 중에 상자를 열어도 병이 버려지지 않게
+  const latest = useRef({}); // 끌어다 놓기 처리기(처음 한 번 등록)가 지금 화면의 함수·값을 쓰게
+  const kindRef = useRef('bottle'); // 끌어다 놓기 처리기가 지금 고른 제품을 알도록
 
   const [status, setStatus] = useState({ text: '제품 사진을 넣으면 시작해요', bad: false });
-  const [loaded, setLoaded] = useState(false);
+  const [product, setProductState] = useState('bottle'); // 왼쪽 패널에서 고친 제품
+  const [has, setHas] = useState({ bottle: false, box: false }); // 사진이 들어온 제품
+  const loaded = has[product], any = has.bottle || has.box;
+  const [boxSide, setBoxSide] = useState({ finish: 'matte', color: '#dddddd' });
+  const [boxDim, setBoxDim] = useState({ scale: 90, depth: 45 });
+  const [gap, setGap] = useState(35);
   const [meta, setMeta] = useState('');
   const [tol, setTol] = useState(DEFAULT_TOL);
   const [part, setPart] = useState('body');
+  latest.current.part = part;
   const [parts, setParts] = useState({ body: { finish: 'photo', color: '#e9e6df' }, cap: { finish: 'photo', color: '#2b2a28' } });
   const [swatches, setSwatches] = useState({});
   const [labelSrc, setLabelSrc] = useState('none');
@@ -116,14 +133,22 @@ export function App() {
     return { ink: resolveColor(el, '--color-text-primary', 'black'), accent: resolveColor(el, '--color-accent', 'firebrick'), shade: 'rgba(255,255,255,0.55)', font: font() };
   };
 
-  const showMeta = (ms) => {
+  const showMeta = (ms, kind = kindRef.current) => {
+    const tail = ms != null ? ` · 분석 ${ms}ms` : '';
+    if (kind === 'box') {
+      const r = SB.rect;
+      setMeta(r ? `앞면 ${((r.right - r.left) * 100).toFixed(0)}×${((r.bottom - r.top) * 100).toFixed(0)}% · 가로/세로 ${((r.right - r.left) * SB.aspect / (r.bottom - r.top)).toFixed(2)}` + tail : '');
+      return;
+    }
     const p = S.profile;
-    setMeta(p ? `점 ${p.points.length} · 축 ${(p.axisX * 100).toFixed(1)}%` + (ms != null ? ` · 분석 ${ms}ms` : '') : '');
+    setMeta(p ? `점 ${p.points.length} · 축 ${(p.axisX * 100).toFixed(1)}%` + tail : '');
   };
+  // 견본 구에 칠할 색: 고른 부위(라벨이면 몸통, 상자면 옆면)
+  const partColor = (p) => (p === 'box' ? viewer.current.box.color : viewer.current.parts[p === 'label' ? 'body' : p].color);
 
   // 재질 견본: 같은 렌더러로 작은 구를 그린다. 한꺼번에 그리면 화면이 몇 초 멈춰서(소프트웨어 렌더링에서 약 3초)
   // 하나씩 쉬어 가며 그린다. 새로 요청이 오면 앞의 줄은 버린다
-  const swatchJob = useRef(0), swatchesDone = useRef(false);
+  const swatchJob = useRef(0), swatchesDone = useRef(false), rectFrame = useRef(0);
   const renderSwatches = useCallback((key, color) => {
     const v = viewer.current;
     if (!v) return;
@@ -148,36 +173,42 @@ export function App() {
       S.profile = profile; S.capY = capY;
       if (!v.setShape(profile, S.image, S.aspect, capY)) say('점들이 한 높이에 몰려 있어요. 위아래로 벌려 주세요', true);
       showMeta();
+    }, (rect) => {
+      // 상자 앞면 사각형을 끌 때: 한 프레임에 한 번만 3D 를 다시 만든다
+      SB.rect = rect;
+      if (rectFrame.current) return;
+      rectFrame.current = requestAnimationFrame(() => { rectFrame.current = 0; v.setBox({ rect: SB.rect }); showMeta(); });
     });
     e.setColors(tokenColors());
     // 재질 견본은 첫 사진이 들어온 뒤에 그린다. 견본을 이미지로 뜨는 순간 밀린 그래픽 작업을 다 기다리는데,
     // 앱을 연 직후엔 셰이더 컴파일이 밀려 있어 화면이 2초 가까이 멈췄다(그동안 사진을 넣어도 못 받음)
     v.emitView();
-    window.studio = { state: S, viewer: v, editor: e };
+    window.studio = { state: S, box: SB, viewer: v, editor: e };
     // 끌어다 놓기
     const over = (ev) => ev.preventDefault();
-    const drop = (ev) => { ev.preventDefault(); loadFile(ev.dataTransfer.files[0]); };
+    const drop = (ev) => { ev.preventDefault(); latest.current.loadFile(ev.dataTransfer.files[0]); };
     document.addEventListener('dragover', over);
     document.addEventListener('drop', drop);
     return () => { document.removeEventListener('dragover', over); document.removeEventListener('drop', drop); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  latest.current.loadFile = loadFile;
   async function loadFile(file) {
     if (!file) return;
     const url = URL.createObjectURL(file);
     try { await loadImage(url, file.name); } finally { URL.revokeObjectURL(url); }
   }
 
-  async function loadImage(src, name) {
-    const token = ++loadSeq.current;
+  async function loadImage(src, name, kind = kindRef.current) {
+    const token = ++loadSeq.current[kind];
     const img = new Image();
     img.src = src;
     try { await img.decode(); } catch {
-      if (token === loadSeq.current) say('이미지를 열 수 없어요. PNG·JPG 사진을 넣어 주세요', true);
+      if (token === loadSeq.current[kind]) say('이미지를 열 수 없어요. PNG·JPG 사진을 넣어 주세요', true);
       return;
     }
-    if (token !== loadSeq.current) return;
+    if (token !== loadSeq.current[kind]) return;
     const iw = img.naturalWidth, ih = img.naturalHeight;
     if (!iw || !ih || Math.max(iw, ih) > 16000 || Math.max(iw / ih, ih / iw) > 10) {
       say('이 사진은 크기나 비율이 너무 커서 열지 않았어요(16000px, 가로세로 10배 안쪽)', true);
@@ -187,50 +218,103 @@ export function App() {
     const tex = document.createElement('canvas');
     tex.width = Math.max(1, Math.round(iw * k)); tex.height = Math.max(1, Math.round(ih * k));
     tex.getContext('2d').drawImage(img, 0, 0, tex.width, tex.height);
-    Object.assign(S, { image: tex, source: img, aspect: iw / ih, name });
-    setLoaded(true);
+    Object.assign(kind === 'box' ? SB : S, { image: tex, source: img, aspect: iw / ih, name });
+    if (kind === 'box') SB.userColor = false; // 새 상자 사진이면 옆면 색도 새로 딴다
+    setHas((h) => ({ ...h, [kind]: true }));
     // 편집기 캔버스가 보이고 크기가 잡힌 다음 따기
-    requestAnimationFrame(() => extract());
+    requestAnimationFrame(() => extract(tol, kind));
   }
 
-  function extract(t = tol) {
-    if (!S.source) return;
-    const v = viewer.current, e = editor.current;
-    const t0 = performance.now();
-    const [w, h] = analysisSize(S.source.naturalWidth, S.source.naturalHeight);
+  // 왼쪽 패널의 제품을 바꾸면 편집기에 그 제품 사진과 선을 다시 올린다
+  function setProduct(kind, redraw = true) {
+    kindRef.current = kind;
+    setProductState(kind);
+    if (!redraw) return;
+    const e = editor.current;
+    if (kind === 'box') { if (SB.image) e.setBox(SB.image, SB.rect); }
+    else if (S.image) { e.set(S.image, S.profile, S.capY); e.setLabel(viewer.current.label.on ? viewer.current.label : null); }
+    showMeta(null, kind);
+  }
+
+  function pixels(source) {
+    const [w, h] = analysisSize(source.naturalWidth, source.naturalHeight);
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const g = c.getContext('2d', { willReadFrequently: true });
-    g.drawImage(S.source, 0, 0, w, h);
-    const res = analyze(g.getImageData(0, 0, w, h).data, w, h, { tol: t });
+    g.drawImage(source, 0, 0, w, h);
+    return [g.getImageData(0, 0, w, h).data, w, h];
+  }
+
+  // 상자: 앞면 사각형 + 옆면 색(앞면 테두리 띠 색)
+  function extractBox(t) {
+    if (!SB.source) return;
+    const v = viewer.current, e = editor.current, onEditor = kindRef.current === 'box';
+    const t0 = performance.now();
+    const [px, w, h] = pixels(SB.source);
+    const { rect, reason } = boxFromImage(px, w, h, { tol: t });
+    const ms = Math.round(performance.now() - t0);
+    if (!rect) {
+      SB.rect = null;
+      v.clear('box');
+      if (onEditor) e.setBox(SB.image, null);
+      say(REASONS[reason] || REASONS.edge, true);
+      showMeta(null, 'box');
+      return;
+    }
+    SB.rect = rect;
+    // 옆면 색: 사용자가 칩으로 고른 색이 있으면 그대로, 아니면 앞면 테두리 띠 색(못 구하면 연회색)
+    const color = SB.userColor ? v.box.color : (edgeColor(px, w, h, rect) || '#dddddd');
+    if (onEditor) e.setBox(SB.image, rect);
+    v.setBox({ rect, image: SB.image, aspect: SB.aspect, color }); // 크기·두께는 viewer 가 들고 있는 값 그대로
+    setBoxSide((b) => ({ ...b, color }));
+    if (onEditor) showMeta(ms, 'box');
+    say(`${SB.name} · 상자 앞면을 찾았어요. 모서리를 끌어 맞추고, 크기·두께는 오른쪽 겉면 > 상자에서 바꿔요`);
+    // 병이 없으면 오른쪽 겉면도 상자 탭으로(병 부위 탭은 할 일이 없다)
+    const cur = S.profile ? latest.current.part : 'box';
+    if (cur !== latest.current.part) setPart(cur);
+    if (!swatchesDone.current || cur === 'box') { swatchesDone.current = true; renderSwatches(cur, partColor(cur)); }
+  }
+
+  function extract(t = tol, kind = kindRef.current) {
+    if (kind === 'box') { extractBox(t); return; }
+    if (!S.source) return;
+    const v = viewer.current, e = editor.current, onEditor = kindRef.current === 'bottle';
+    const t0 = performance.now();
+    const [px, w, h] = pixels(S.source);
+    const res = analyze(px, w, h, { tol: t });
     const ms = Math.round(performance.now() - t0);
     if (!res.profile) {
       S.profile = null;
       v.clear();
-      e.set(S.image, null);
+      if (onEditor) { e.set(S.image, null); showMeta(); }
       say(REASONS[res.reason] || REASONS.edge, true);
-      showMeta();
       return;
     }
     S.profile = res.profile;
     S.capY = suggestCapSplit(res.profile);
-    e.set(S.image, res.profile, S.capY);
     v.setShape(res.profile, S.image, S.aspect, S.capY);
-    e.setLabel(v.label.on ? v.label : null);
-    showMeta(ms);
+    if (onEditor) { e.set(S.image, res.profile, S.capY); e.setLabel(v.label.on ? v.label : null); showMeta(ms); }
     say(`${S.name} · 외곽선을 땄어요. 어긋난 곳은 점을 끌어서 고치세요`);
     // 처음이면 견본 다섯 개를, 아니면 '사진' 견본만 다시 그린다(나머지는 색에만 달렸다). 3D 가 먼저 뜨게 한 박자 뒤에
-    if (!swatchesDone.current) { swatchesDone.current = true; renderSwatches(part, v.parts[part === 'label' ? 'body' : part].color); }
+    if (!swatchesDone.current) { swatchesDone.current = true; renderSwatches(latest.current.part, partColor(latest.current.part)); }
     else requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => setSwatches((sw) => ({ ...sw, photo: v.swatch('photo', '#ffffff') })), 250)));
   }
 
   // ── 겉면
-  const curPart = part === 'label' ? null : parts[part];
+  const curPart = part === 'label' ? null : part === 'box' ? boxSide : parts[part];
   function chooseFinish(finish) {
+    if (part === 'box') { viewer.current.setBoxFinish(finish); setBoxSide((b) => ({ ...b, finish })); return; }
     viewer.current.setFinish(part, finish);
     setParts((ps) => ({ ...ps, [part]: { ...ps[part], finish } }));
   }
   function chooseColor(color) {
+    if (part === 'box') {
+      SB.userColor = true;
+      viewer.current.setBoxFinish(null, color);
+      setBoxSide((b) => ({ ...b, color }));
+      renderSwatches('box', color);
+      return;
+    }
     const p = viewer.current.parts[part];
     const finish = p.finish === 'photo' ? 'matte' : p.finish; // 사진 상태에서 색을 고르면 색이 보이는 무광으로
     viewer.current.setFinish(part, finish, color);
@@ -239,7 +323,12 @@ export function App() {
   }
   function choosePart(next) {
     setPart(next);
-    if (next !== 'label') renderSwatches(next, viewer.current.parts[next].color);
+    if (next !== 'label') renderSwatches(next, partColor(next));
+  }
+  function resizeBox(key, value) {
+    const d = { ...boxDim, [key]: value };
+    setBoxDim(d);
+    viewer.current.setBoxSize({ scale: d.scale / 100, depth: d.depth / 100 });
   }
 
   // ── 라벨: 높이·크기는 병 높이 비율, 감기는 둘레 각도
@@ -271,17 +360,42 @@ export function App() {
   }
 
   // ── 저장
+  const stamp = () => {
+    const t = new Date(), p = (n) => String(n).padStart(2, '0');
+    return `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}_${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`;
+  };
+  function download(href, name) {
+    const a = document.createElement('a');
+    a.download = name; a.href = href;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
   function save() {
-    if (!S.profile) { say('먼저 사진을 넣어 주세요', true); return; }
+    if (!viewer.current.ready) { say('먼저 사진을 넣어 주세요', true); return; }
     const [w, h] = size.split('x').map(Number);
     const url = viewer.current.capture(w, h);
     if (!url) { say('저장하지 못했어요. 3D 화면이 멈췄거나 이 크기를 그래픽 카드가 못 그려요. 작은 크기로 해 보세요', true); return; }
-    const a = document.createElement('a');
-    const t = new Date(), p = (n) => String(n).padStart(2, '0');
-    a.download = `studio_${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}_${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}.png`;
-    a.href = url;
-    document.body.appendChild(a); a.click(); a.remove();
+    download(url, `studio_${stamp()}.png`);
     say(`${w}×${h} PNG 로 저장했어요`);
+  }
+
+  // ── OBJ 저장: 모양(model.obj) + 재질(model.mtl) + 입힌 그림(PNG)을 zip 하나로
+  const toPNG = (img) => new Promise((resolve, reject) => {
+    const c = document.createElement('canvas');
+    c.width = img.width || img.naturalWidth; c.height = img.height || img.naturalHeight;
+    c.getContext('2d').drawImage(img, 0, 0);
+    c.toBlob((b) => (b ? b.arrayBuffer().then((buf) => resolve(new Uint8Array(buf)), reject) : reject(new Error('png'))), 'image/png');
+  });
+  async function saveOBJ() {
+    const out = viewer.current.ready && viewer.current.exportOBJ();
+    if (!out) { say('먼저 사진을 넣어 주세요', true); return; }
+    try {
+      const files = { 'model.obj': strToU8(out.obj), 'model.mtl': strToU8(out.mtl) };
+      for (const [name, img] of Object.entries(out.textures)) files[name] = await toPNG(img);
+      const url = URL.createObjectURL(new Blob([zipSync(files)], { type: 'application/zip' }));
+      download(url, `studio_model_${stamp()}.zip`);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      say(`OBJ 로 저장했어요(덩어리 ${out.meshes}개, 그림 ${Object.keys(out.textures).length}장). Blender 등에서 model.obj 를 열면 돼요`);
+    } catch { say('OBJ 를 묶지 못했어요. 다시 눌러 주세요', true); }
   }
 
   // ── 연출 컷: 캡처 → 로컬 서버 → Codex. 서버는 이 페이지에 끼워 준 토큰과 같은 주소에서 온 요청만 받는다
@@ -315,7 +429,7 @@ export function App() {
     }, 1000);
   }
   async function makeShot() {
-    if (!S.profile) { say('먼저 사진을 넣어 주세요', true); return; }
+    if (!viewer.current.ready) { say('먼저 사진을 넣어 주세요', true); return; }
     if (pending) return;
     const image = viewer.current.capture(1080, 1350);
     if (!image) { say('캡처를 뜨지 못했어요. 3D 화면이 멈췄으면 새로고침해 주세요', true); return; }
@@ -336,12 +450,9 @@ export function App() {
     if (shot?.state !== 'done') return;
     const r = await fetch(`/api/shot/${shot.id}/image`, { headers: { 'X-Studio-Token': token() } });
     if (!r.ok) { say('연출 컷 파일을 받지 못했어요', true); return; }
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `shot_${shot.id}.png`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const url = URL.createObjectURL(await r.blob());
+    download(url, `shot_${shot.id}.png`);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     say('연출 컷을 저장했어요');
   }
   useEffect(() => () => { alive.current = false; clearTimeout(pollTimer.current); }, []);
@@ -365,6 +476,7 @@ export function App() {
                 </HStack>
                 <Text type="supporting" color={status.bad ? 'accent' : 'secondary'} maxLines={1} data-testid="status">{status.text}</Text>
                 <HStack gap={2} vAlign="center">
+                  <Button variant="secondary" size="sm" label="OBJ 저장" icon={<Icon icon={Box} size="sm" />} isDisabled={!any} onClick={saveOBJ} data-testid="save-obj" />
                   <Selector label="저장 크기" isLabelHidden size="sm" options={SIZES} value={size} onChange={setSize} data-testid="size" />
                   <Button variant="primary" size="sm" label="PNG 저장" icon={<Icon icon={Download} size="sm" />} onClick={save} data-testid="save" />
                 </HStack>
@@ -378,10 +490,14 @@ export function App() {
                 start={
                   <LayoutPanel hasDivider width={320} padding={0} isScrollable label="사진과 옆선">
                     <InspectorSection title="사진">
+                      <TabList value={product} onChange={(k) => setProduct(k)} size="sm" layout="fill" hasDivider data-testid="product">
+                        <Tab value="bottle" label="병" />
+                        <Tab value="box" label="상자" />
+                      </TabList>
                       <HStack gap={2} vAlign="center" hAlign="between">
                         <HStack gap={1}>
-                          {SAMPLES.map((s) => (
-                            <Thumbnail key={s.src} src={s.src} alt={s.name} label={`예시: ${s.name}`} onClick={() => loadImage(s.src, s.src.split('/').pop())} />
+                          {SAMPLES[product].map((s) => (
+                            <Thumbnail key={s.src} src={s.src} alt={s.name} label={`예시: ${s.name}`} onClick={() => loadImage(s.src, s.src.split('/').pop(), product)} />
                           ))}
                         </HStack>
                         {loaded && (
@@ -395,12 +511,16 @@ export function App() {
                           {!loaded && (
                             <FileInput mode="dropzone" label="제품 사진" isLabelHidden accept="image/*"
                               placeholder="제품 사진을 끌어다 놓거나 눌러서 고르기"
-                              description="정면에서 찍은, 배경이 단색인 병 사진. 위 예시를 눌러도 돼요"
+                              description={product === 'box'
+                                ? '앞면을 정면에서 찍은, 배경이 단색인 상자 사진. 위 예시를 눌러도 돼요'
+                                : '정면에서 찍은, 배경이 단색인 병 사진. 위 예시를 눌러도 돼요'}
                               value={null} onChange={(f) => loadFile(Array.isArray(f) ? f[0] : f)} data-testid="file" />
                           )}
                         </AspectRatio>
                       </Card>
-                      <Text type="supporting">점을 끌어 옮기고, 선 위 더블클릭으로 추가, 우클릭으로 지워요. "뚜껑" 이름표가 붙은 가로선을 위아래로 끌면 뚜껑 경계가 옮겨져요</Text>
+                      <Text type="supporting">{product === 'box'
+                        ? '사각형의 모서리나 변을 끌어 앞면에 맞춰요. 상자 가로·세로 비율은 이 사각형에서, 높이·두께는 오른쪽 겉면 > 상자에서 정해요'
+                        : '점을 끌어 옮기고, 선 위 더블클릭으로 추가, 우클릭으로 지워요. "뚜껑" 이름표가 붙은 가로선을 위아래로 끌면 뚜껑 경계가 옮겨져요'}</Text>
                     </InspectorSection>
                     <InspectorSection title="외곽선 따기">
                       <Slider label="배경 구분" description="제품과 배경이 섞이면 낮추고, 배경까지 잡히면 올려요" min={8} max={60} value={tol} onChange={setTol} onChangeEnd={(t) => extract(t)} valueDisplay="inline" />
@@ -474,13 +594,15 @@ export function App() {
                         <Tab value="body" label="몸통" />
                         <Tab value="cap" label="뚜껑" />
                         <Tab value="label" label="라벨" />
+                        <Tab value="box" label="상자" />
                       </TabList>
                       {curPart ? (
                         <VStack gap={3}>
+                          {part === 'box' && <Text type="supporting">앞·뒷면은 사진, 나머지 네 면에 입힐 재질과 색이에요</Text>}
                           <HStack gap={1} data-testid="finishes">
-                            {Object.entries(FINISHES).map(([k, f]) => (
-                              <SelectableCard key={k} label={f.name} padding={1} width="20%" isSelected={curPart.finish === k}
-                                isDisabled={k === 'photo' && !loaded} onChange={() => chooseFinish(k)} data-finish={k}>
+                            {Object.entries(FINISHES).filter(([k]) => part !== 'box' || k !== 'photo').map(([k, f]) => (
+                              <SelectableCard key={k} label={f.name} padding={1} width={part === 'box' ? '25%' : '20%'} isSelected={curPart.finish === k}
+                                isDisabled={k === 'photo' && !has.bottle} onChange={() => chooseFinish(k)} data-finish={k}>
                                 <VStack gap={1} hAlign="center">
                                   <AspectRatio ratio={1} shape="circle">{swatches[k] ? <img src={swatches[k]} alt="" /> : null}</AspectRatio>
                                   <Text type="supporting" size="xsm">{f.name}</Text>
@@ -495,6 +617,14 @@ export function App() {
                                 style={{ background: c, borderRadius: "var(--radius-full)" }} data-chip={c} />
                             ))}
                           </HStack>
+                          {part === 'box' && (
+                            <VStack gap={3}>
+                              <Slider label="크기(병 대비)" description="병 높이를 100% 로 본 상자 높이" min={40} max={150} value={boxDim.scale}
+                                onChange={(x) => resizeBox('scale', x)} formatValue={(x) => `${x}%`} valueDisplay="inline" isDisabled={!has.box} data-testid="box-scale" />
+                              <Slider label="두께" description="앞면 가로를 100% 로 본 옆면 폭" min={10} max={100} value={boxDim.depth}
+                                onChange={(x) => resizeBox('depth', x)} formatValue={(x) => `${x}%`} valueDisplay="inline" isDisabled={!has.box} data-testid="box-depth" />
+                            </VStack>
+                          )}
                         </VStack>
                       ) : (
                         <VStack gap={3}>
@@ -530,6 +660,10 @@ export function App() {
                       <SegmentedControl label="받침" size="sm" layout="fill" value={pedestal} onChange={(k) => { setPedestal(k); viewer.current.setSet({ pedestal: k }); }}>
                         {Object.entries(PEDESTALS).map(([k, n]) => <SegmentedControlItem key={k} value={k} label={n} />)}
                       </SegmentedControl>
+                      {has.bottle && has.box && (
+                        <Slider label="병과 상자 간격" min={0} max={150} value={gap} data-testid="gap"
+                          onChange={(x) => { setGap(x); viewer.current.setGap(x / 100); }} formatValue={(x) => `${x}`} valueDisplay="inline" />
+                      )}
                     </InspectorSection>
                     <InspectorSection title="연출 컷">
                       <Text type="supporting">지금 앵글·조명으로 캡처를 떠서 내 PC 의 Codex 에 넘기면, 구도는 그대로 두고 광고 사진으로 만들어 줘요(1분 남짓)</Text>
@@ -544,7 +678,7 @@ export function App() {
                         </VStack>
                       ) : (
                         <Button variant="primary" label="연출 컷 만들기" icon={<Icon icon={Clapperboard} size="sm" />}
-                          isDisabled={!loaded || pending} onClick={makeShot} data-testid="shot" />
+                          isDisabled={!any || pending} onClick={makeShot} data-testid="shot" />
                       )}
                     </InspectorSection>
                     <InspectorSection title="조명">

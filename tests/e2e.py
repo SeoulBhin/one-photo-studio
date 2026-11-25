@@ -90,6 +90,144 @@ def check(cond, msg):
         FAILS.append(msg)
 
 
+BOX_OK = "() => document.querySelector('[data-testid=status]').textContent.includes('상자 앞면을 찾았어요')"
+# 예시 상자 사진의 앞면 사각형(사진 비율). 2026-11-25 눈으로 맞는 걸 확인한 값, ±0.01
+BOX_EXPECT = {"left": 0.355, "right": 0.641, "top": 0.181, "bottom": 0.845}
+
+
+def box_and_obj(page):
+    """상자: 사진 → 앞면 사각형 → 3D 상자, 사각형·크기·두께 손으로 조절, 병과 나란히, OBJ(+재질·그림) 저장"""
+    import io
+    import re
+    import zipfile
+    print("[상자]")
+    page.locator("button", has_text="상자").first.click()
+    t0 = time.perf_counter()
+    put_file(page, str(SAMPLE_DIR / "box_cream.png"))
+    page.wait_for_function(BOX_OK, timeout=5000)
+    check(time.perf_counter() - t0 < 3, "상자 3D 3초 안")
+    r = page.evaluate("studio.box.rect")
+    for k, v in BOX_EXPECT.items():
+        check(abs(r[k] - v) <= 0.01, f"앞면 {k} {r[k]:.3f} (기대 {v:.3f}±0.01)")
+    check(page.evaluate("studio.viewer.bottle.visible && studio.viewer.boxGroup.visible"), "병과 상자가 한 세트에 같이 섬")
+    # 위에서 본 두 바닥 사각형이 겹치지 않는가(병은 몸통 반지름, 상자는 W×D)
+    sep = page.evaluate("""() => { const v = studio.viewer; v.products.updateMatrixWorld(true);
+        const s = v.boxSize(), bx = v.boxGroup.position.x, rB = Math.max(...v.shape.points.map(p => p[0]));
+        return (v.bottle.position.x - rB) - (bx + s.W / 2); }""")
+    check(sep > 0.05, f"병과 상자가 겹치지 않음(틈 {sep:.2f})")
+    # 앞면 사각형 오른쪽 아래 모서리를 끌면 상자 가로/세로 비율이 바뀐다
+    w0 = page.evaluate("studio.viewer.boxSize().W / studio.viewer.boxSize().H")
+    xy = page.evaluate("""() => { const e = studio.editor, c = e.canvas.getBoundingClientRect(), r = e.rect;
+        return [c.left + r.right * e.w, c.top + r.bottom * e.h]; }""")
+    page.mouse.move(*xy); page.mouse.down(); page.mouse.move(xy[0] + 20, xy[1] - 20, steps=4); page.mouse.up()
+    page.wait_for_timeout(100)
+    w1 = page.evaluate("studio.viewer.boxSize().W / studio.viewer.boxSize().H")
+    check(w1 > w0 * 1.1, f"모서리를 끌면 3D 상자 비율이 따라 바뀜({w0:.2f} → {w1:.2f})")
+    page.click("[data-testid=redo]")
+    page.wait_for_function(BOX_OK, timeout=5000)
+    # 오른쪽 겉면 > 상자: 크기·두께·옆면 색
+    page.locator("button", has_text="상자").last.click()
+    h0, d0 = page.evaluate("[studio.viewer.boxSize().H, studio.viewer.boxSize().D]")
+    page.get_by_role("slider", name="크기(병 대비)").focus(); page.keyboard.press("End")
+    page.get_by_role("slider", name="두께").focus(); page.keyboard.press("Home")
+    h1, d1 = page.evaluate("[studio.viewer.boxSize().H, studio.viewer.boxSize().D]")
+    check(h1 > h0 * 1.4 and d1 < d0 * 0.5, f"크기·두께 손잡이로 3D 상자 높이 {h0:.2f}→{h1:.2f}, 두께 {d0:.2f}→{d1:.2f}")
+    check(abs(page.evaluate("(() => { const g = studio.viewer.box.print.geometry; g.computeBoundingBox(); return g.boundingBox.max.y - g.boundingBox.min.y; })()") - h1) < 1e-6,
+          "3D 상자 높이 = 계산한 높이")
+    page.get_by_role("slider", name="크기(병 대비)").focus(); page.keyboard.press("Home")
+    for _ in range(50):
+        page.keyboard.press("ArrowRight")  # 40% → 90%
+    page.get_by_role("slider", name="두께").focus()
+    for _ in range(35):
+        page.keyboard.press("ArrowRight")  # 10% → 45%
+    card(page, "[data-chip='#7d2a22']")
+    check(page.evaluate("studio.viewer.box.side.material.color.getHexString()") == "7d2a22", "옆면 색 바꾸기")
+    check(page.evaluate("studio.viewer.box.print.material.map != null"), "앞·뒷면은 그대로 사진")
+    # 리뷰에서 찾은 것들(2026-11-25)
+    page.click("[data-testid=redo]")
+    page.wait_for_function(BOX_OK, timeout=5000)
+    check(page.evaluate("studio.viewer.box.side.material.color.getHexString()") == "7d2a22", "다시 따도 고른 옆면 색은 그대로")
+    radio(page, "원기둥")
+    fit = page.evaluate("""() => { const v = studio.viewer, s = v.boxSize(), p = v.boxGroup.position;
+        const r = v.pedestal.geometry.parameters.radiusTop;
+        return Math.max(...[-1, 1].flatMap(a => [-1, 1].map(b => Math.hypot(p.x + a * s.W / 2, p.z + b * s.D / 2)))) < r; }""")
+    check(fit, "둥근 받침 위에 상자 네 귀퉁이가 다 올라감")
+    radio(page, "없음")
+    # 끌어다 놓기: 처음 그린 화면의 값(크기 90%)이 아니라 지금 손잡이 값(150%)으로 상자를 만든다
+    page.get_by_role("slider", name="크기(병 대비)").focus(); page.keyboard.press("End")
+    page.evaluate("""async () => { const b = await (await fetch('/samples/box_navy.png')).blob(), dt = new DataTransfer();
+        dt.items.add(new File([b], 'box_navy.png', { type: 'image/png' }));
+        document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); }""")
+    page.wait_for_function("() => document.querySelector('[data-testid=status]').textContent.includes('box_navy.png · 상자 앞면')", timeout=5000)
+    check(abs(page.evaluate("studio.viewer.boxSize().H") - 4.5) < 1e-6, "끌어다 놓은 상자도 지금 크기 손잡이 값(150%)으로")
+    # 상자 따기가 실패한 뒤 크기 손잡이를 움직여도 멈추지 않는다
+    blank = OUT / "blank_box.png"
+    Image.new("RGB", (600, 750), (205, 205, 205)).save(blank)
+    put_file(page, str(blank))
+    page.wait_for_function("() => document.querySelector('[data-testid=status]').textContent.includes('찾지 못했어요')", timeout=5000)
+    check(not page.evaluate("studio.viewer.boxGroup.visible"), "상자 따기 실패 → 상자가 3D 에서 사라짐")
+    page.get_by_role("slider", name="크기(병 대비)").focus(); page.keyboard.press("ArrowLeft")
+    page.wait_for_timeout(100)
+    put_file(page, str(SAMPLE_DIR / "box_cream.png"))
+    page.wait_for_function(BOX_OK, timeout=5000)
+    check(page.evaluate("studio.viewer.boxGroup.visible"), "실패 뒤에도 다음 상자 사진이 열림")
+    card(page, "[data-chip='#7d2a22']")
+    page.get_by_role("slider", name="크기(병 대비)").focus(); page.keyboard.press("Home")
+    for _ in range(50):
+        page.keyboard.press("ArrowRight")  # 다시 90%
+    g0 = page.evaluate("studio.viewer.bottle.position.x - studio.viewer.boxGroup.position.x")
+    page.get_by_role("slider", name="병과 상자 간격").focus(); page.keyboard.press("End")
+    g1 = page.evaluate("studio.viewer.bottle.position.x - studio.viewer.boxGroup.position.x")
+    check(g1 > g0 + 0.5, f"간격 손잡이로 둘 사이가 벌어짐({g0:.2f} → {g1:.2f})")
+    page.get_by_role("slider", name="병과 상자 간격").focus(); page.keyboard.press("Home")
+    for _ in range(35):
+        page.keyboard.press("ArrowRight")
+    with page.expect_download() as dl:
+        page.click("[data-testid=save]")
+    p_both = OUT / "bottle_and_box.png"
+    dl.value.save_as(p_both)
+    check(blank_ratio(p_both) > 0.08, f"병+상자 PNG 빈 화면 아님({blank_ratio(p_both):.1%})")
+
+    # OBJ 저장: zip 안에 obj·mtl·그림, 면 번호가 점 개수 안쪽, 쓴 재질이 mtl 에 다 있음
+    print("[OBJ]")
+    with page.expect_download() as dl:
+        page.click("[data-testid=save-obj]")
+    p_zip = OUT / "studio_model.zip"
+    dl.value.save_as(p_zip)
+    z = zipfile.ZipFile(p_zip)
+    names = set(z.namelist())
+    check({"model.obj", "model.mtl", "photo.png", "box_front.png"} <= names, f"zip 안 파일 {sorted(names)}")
+    obj = z.read("model.obj").decode()
+    mtl = z.read("model.mtl").decode()
+    nv = sum(1 for l in obj.splitlines() if l.startswith("v "))
+    nvt = sum(1 for l in obj.splitlines() if l.startswith("vt "))
+    idx = [int(p.split("/")[0]) for l in obj.splitlines() if l.startswith("f ") for p in l.split()[1:]]
+    check(nv > 100 and nvt > 0 and idx and max(idx) <= nv and min(idx) >= 1, f"점 {nv}·텍스처 좌표 {nvt}·면 번호 {min(idx)}~{max(idx)}")
+    used = set(re.findall(r"^usemtl (\S+)", obj, re.M))
+    defined = set(re.findall(r"^newmtl (\S+)", mtl, re.M))
+    check({"bottle_body", "bottle_cap", "box_print", "box_side"} <= used and used <= defined, f"재질 {sorted(used)} 이 mtl 에 다 있음")
+    maps = set(re.findall(r"^map_Kd (\S+)", mtl, re.M))
+    check(maps <= names and "box_front.png" in maps, f"mtl 이 부르는 그림 {sorted(maps)} 이 zip 에 있음")
+    front = Image.open(io.BytesIO(z.read("box_front.png")))
+    check(front.size[0] > 50 and front.size[1] > 50, f"상자 앞면 그림 {front.size}")
+    ys = [float(l.split()[2]) for l in obj.splitlines() if l.startswith("v ")]
+    check(abs(min(ys)) < 1e-3, f"바닥이 0(받침 높이 빠짐, 최저 {min(ys):.4f})")
+    # 덩어리마다 이름이 붙고, 놓인 자리(가로 가운데)가 화면 속 자리와 같다(월드 행렬을 안 쓰면 전부 원점에 겹친다)
+    cx, cur = {}, None
+    for l in obj.splitlines():
+        if l.startswith("o "):
+            cur = l.split()[1]
+            cx[cur] = []
+        elif l.startswith("v ") and cur:
+            cx[cur].append(float(l.split()[1]))
+    cx = {k: (min(v) + max(v)) / 2 for k, v in cx.items() if v}
+    want = page.evaluate("[studio.viewer.bottle.position.x, studio.viewer.boxGroup.position.x]")
+    check(set(cx) >= {"bottle_body", "box_print", "box_side"}
+          and abs(cx["bottle_body"] - want[0]) < 0.02 and abs(cx["box_print"] - want[1]) < 0.02,
+          f"OBJ 속 자리 병 {cx.get('bottle_body', 0):.2f}·상자 {cx.get('box_print', 0):.2f} = 화면 {want[0]:.2f}·{want[1]:.2f}")
+    check(not page.evaluate("studio.viewer.lost"), "WebGL 살아 있음")
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     port = free_port()
@@ -196,7 +334,7 @@ def main():
                 tab(page, "라벨"); radio(page, "예시 라벨")
                 check(page.evaluate("!!studio.viewer.label.mesh"), "예시 라벨이 병에 감김")
                 radio(page, "원기둥")
-                check(page.evaluate("studio.viewer.bottle.position.y") > 0.3, "받침을 깔면 병이 그 위로 올라감")
+                check(page.evaluate("studio.viewer.products.position.y") > 0.3, "받침을 깔면 제품이 그 위로 올라감")
                 card(page, "[data-backdrop=ink]")
                 check(page.evaluate("studio.viewer.scene.background.getHexString()") == "3b3a38", "배경지 색 바뀜")
                 cap0 = page.evaluate("studio.state.capY")
@@ -234,6 +372,8 @@ def main():
                 check(page.evaluate("studio.viewer.bottle.visible"), "오류 뒤에도 다음 사진이 열림")
             except Exception as e:  # noqa: BLE001 — 시간 초과도 실패로 세고 끝까지 간다
                 check(False, f"오류 뒤 다음 사진 열기: {type(e).__name__}")
+
+            box_and_obj(page)
 
             # 연출 컷: 버튼 → 진행 → 비교 보기(캡처 | 결과) → 저장 → 3D 로 돌아가기 / 취소
             print("[연출 컷]")

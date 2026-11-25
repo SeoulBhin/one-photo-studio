@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { toLathe } from './outline.js';
 
 export const ASPECT = 4 / 5; // 화면과 저장 PNG 를 같은 비율로 묶어 보이는 그대로 저장한다
@@ -82,11 +83,19 @@ export class Viewer {
     this.marker = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), new THREE.MeshBasicMaterial({ color: '#f3c178' }));
     this.scene.add(this.marker);
 
-    this.stand = new THREE.Group(); // 받침 + 병. 받침 높이만큼 병이 올라간다
+    this.stand = new THREE.Group(); // 받침 + 제품 묶음. 받침 높이만큼 제품이 올라간다
     this.scene.add(this.stand);
+    this.products = new THREE.Group();
+    this.stand.add(this.products);
     this.bottle = new THREE.Group();
-    this.stand.add(this.bottle);
+    this.bottle.visible = false;
+    this.boxGroup = new THREE.Group();
+    this.boxGroup.visible = false;
+    this.products.add(this.bottle, this.boxGroup);
     this.pedestal = null;
+    // 상자: 앞면 사각형(사진 비율)·크기(병 높이 대비)·두께(가로 대비)·옆면 재질
+    this.box = { rect: null, image: null, aspect: 1, scale: 0.9, depth: 0.45, finish: 'matte', color: '#dddddd', tex: null, print: null, side: null };
+    this.gap = 0.35;
 
     this.photoTex = null;
     this.labelTex = null;
@@ -105,7 +114,7 @@ export class Viewer {
     canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.lost = true; onLost?.(); });
     canvas.addEventListener('webglcontextrestored', () => {
       this.lost = false;
-      for (const t of [this.photoTex, this.labelTex]) if (t) t.needsUpdate = true;
+      for (const t of [this.photoTex, this.labelTex, this.box?.tex]) if (t) t.needsUpdate = true;
       onRestored?.();
       this.requestRender();
     });
@@ -160,9 +169,92 @@ export class Viewer {
     this.buildPart('cap', split < HEIGHT - 0.02 ? slice(lathe.points, split, HEIGHT) : null);
     this.buildLabel();
     this.bottle.visible = true;
-    this.placeStand();
+    this.layout();
     this.requestRender();
     return true;
+  }
+
+  // ── 상자. rect: 사진 속 앞면(비율 좌표), image: 사진 전체, aspect: 사진 가로/세로
+  setBox(patch) {
+    const B = this.box;
+    if (patch.image && patch.image !== B.image) {
+      B.image = patch.image;
+    }
+    Object.assign(B, patch);
+    if (!B.rect || !B.image) return false;
+    const r = B.rect, dw = r.right - r.left, dh = r.bottom - r.top;
+    if (dw < 0.02 || dh < 0.02) return false;
+    // 앞면 사진만 잘라 텍스처로(뒷면도 같은 그림)
+    const img = B.image, iw = img.width || img.naturalWidth, ih = img.height || img.naturalHeight;
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round(dw * iw)); crop.height = Math.max(1, Math.round(dh * ih));
+    crop.getContext('2d').drawImage(img, r.left * iw, r.top * ih, crop.width, crop.height, 0, 0, crop.width, crop.height);
+    B.tex?.dispose();
+    B.tex = new THREE.CanvasTexture(crop);
+    B.tex.colorSpace = THREE.SRGBColorSpace;
+    B.tex.anisotropy = 4;
+    B.crop = crop;
+    this.buildBox();
+    this.boxGroup.visible = true;
+    this.layout();
+    this.requestRender();
+    return true;
+  }
+
+  boxSize() {
+    const B = this.box, r = B.rect;
+    const H = HEIGHT * B.scale;
+    const W = H * ((r.right - r.left) * B.aspect) / (r.bottom - r.top);
+    return { W, H, D: W * B.depth };
+  }
+
+  buildBox() {
+    const B = this.box;
+    for (const k of ['print', 'side']) {
+      if (B[k]) { B[k].geometry.dispose(); B[k].material.dispose(); this.boxGroup.remove(B[k]); B[k] = null; }
+    }
+    const { W, H, D } = this.boxSize();
+    const geo = new THREE.BoxGeometry(W, H, D);
+    geo.translate(0, H / 2, 0);
+    // OBJ 는 덩어리마다 재질이 하나라 앞·뒤(인쇄면)와 나머지(옆면)를 다른 덩어리로 나눈다
+    const [front, side] = splitBoxFaces(geo);
+    geo.dispose();
+    B.print = new THREE.Mesh(front, new THREE.MeshStandardMaterial({ map: B.tex, roughness: 0.7, envMapIntensity: 0.5, name: 'box_print' }));
+    B.side = new THREE.Mesh(side, makeMaterial(B.finish, B.color, null));
+    B.side.material.name = 'box_side';
+    for (const m of [B.print, B.side]) { m.castShadow = true; m.receiveShadow = true; this.boxGroup.add(m); }
+  }
+
+  setBoxFinish(finish, color) {
+    const B = this.box;
+    if (finish) B.finish = finish === 'photo' ? 'matte' : finish;
+    if (color) B.color = color;
+    if (B.side) { B.side.material.dispose(); B.side.material = makeMaterial(B.finish, B.color, null); B.side.material.name = 'box_side'; }
+    this.requestRender();
+  }
+
+  setBoxSize(patch) {
+    Object.assign(this.box, patch);
+    if (this.box.print && this.box.rect) { this.buildBox(); this.layout(); this.requestRender(); }
+  }
+
+  setGap(gap) { this.gap = gap; this.layout(); this.requestRender(); }
+
+  // 병·상자를 나란히: 상자는 왼쪽 조금 앞, 병은 오른쪽 조금 뒤. 묶음 가운데가 x = 0
+  // (45° 카메라가 오른쪽 앞에 있어서, 오른쪽 제품이 앞으로 나오면 왼쪽 제품을 가린다)
+  layout() {
+    const hasBottle = this.bottle.visible && this.shape, hasBox = this.boxGroup.visible && this.box.print;
+    const rB = hasBottle ? Math.max(...this.shape.points.map((p) => p[0])) : 0;
+    const box = hasBox ? this.boxSize() : null;
+    if (hasBottle && hasBox) {
+      const total = box.W + this.gap + rB * 2;
+      this.boxGroup.position.set(-total / 2 + box.W / 2, 0, 0.25);
+      this.bottle.position.set(total / 2 - rB, 0, -0.35);
+    } else {
+      this.boxGroup.position.set(0, 0, 0);
+      this.bottle.position.set(0, 0, 0);
+    }
+    this.placeStand();
   }
 
   buildPart(key, points) {
@@ -244,7 +336,21 @@ export class Viewer {
   // 받침을 병 크기에 맞춰 다시 만들고 병을 그 위에 세운다
   placeStand() {
     if (this.pedestal) { this.stand.remove(this.pedestal); this.pedestal.traverse(o => { o.geometry?.dispose(); o.material?.dispose?.(); }); this.pedestal = null; }
-    const rMax = this.shape ? Math.max(...this.shape.points.map(p => p[0])) : 0.7;
+    // 받침 크기 = 위에서 볼 때 가운데에서 가장 먼 제품 끝까지 거리(병은 몸통 둘레, 상자는 네 귀퉁이).
+    // 병 하나면 예전처럼 병 반지름이 되고, 둥근 받침에서도 상자 귀퉁이가 밖으로 나가지 않는다
+    let rMax = 0, topH = 0;
+    if (this.bottle.visible && this.shape) {
+      const p = this.bottle.position, rB = Math.max(...this.shape.points.map((q) => q[0]));
+      rMax = Math.hypot(p.x, p.z) + rB;
+      topH = HEIGHT;
+    }
+    if (this.boxGroup.visible && this.box.print) {
+      const p = this.boxGroup.position, { W, H, D } = this.boxSize();
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) rMax = Math.max(rMax, Math.hypot(p.x + sx * W / 2, p.z + sz * D / 2));
+      topH = Math.max(topH, H);
+    }
+    if (!rMax) { rMax = 0.7; topH = HEIGHT; }
+    rMax = Math.max(0.3, rMax);
     const kind = this.set.pedestal;
     let h = 0, mesh = null;
     if (kind === 'round') {
@@ -268,16 +374,17 @@ export class Viewer {
       this.stand.add(mesh);
     }
     // 받침 높이가 바뀐 만큼 카메라도 같이 올려 구도를 유지한다
-    const dy = h - this.bottle.position.y;
+    const dy = h - this.products.position.y;
     this.camera.position.y += dy;
-    this.bottle.position.y = h;
-    this.controls.target.set(0, h + HEIGHT / 2, 0);
-    this.key.target.position.set(0, h + HEIGHT / 3, 0);
+    this.products.position.y = h;
+    this.focusY = h + topH / 2;
+    this.controls.target.set(0, this.focusY, 0);
+    this.key.target.position.set(0, h + topH / 3, 0);
     this.controls.update();
   }
 
   setCamera(key) {
-    const [x, y, z] = CAMERAS[key].pos, ty = (this.bottle?.position.y || 0) + HEIGHT / 2;
+    const [x, y, z] = CAMERAS[key].pos, ty = this.focusY ?? HEIGHT / 2;
     this.controls.target.set(0, ty, 0);
     this.camera.position.set(x, ty + y, z);
     this.controls.update();
@@ -295,14 +402,53 @@ export class Viewer {
 
   emitView() { this.onView?.(this.view(), this.light); }
 
-  // 외곽선을 못 땄을 때: 이전 병이 화면·저장에 남지 않게 숨긴다
-  clear() {
-    this.bottle.visible = false;
-    this.shape = null;
+  // 외곽선을 못 땄을 때: 그 제품이 화면·저장에 남지 않게 숨긴다
+  clear(kind = 'bottle') {
+    if (kind === 'box') { this.boxGroup.visible = false; this.box.rect = null; }
+    else { this.bottle.visible = false; this.shape = null; }
+    this.layout();
     this.requestRender();
   }
 
-  get ready() { return !!this.shape && this.bottle.visible; }
+  get ready() { return (!!this.shape && this.bottle.visible) || (!!this.box.print && this.boxGroup.visible); }
+
+  // ── OBJ 저장: 세트에 선 제품만(받침·배경지 빼고) → { obj, mtl, textures: {파일이름: canvas} }
+  exportOBJ() {
+    const root = new THREE.Group();
+    const textures = {};
+    const mtl = ['# 한 장 스튜디오에서 저장', ''];
+    const add = (mesh, name, tex, texName) => {
+      if (!mesh || !mesh.visible || !mesh.parent?.visible) return;
+      mesh.updateWorldMatrix(true, false);
+      const copy = new THREE.Mesh(mesh.geometry, mesh.material.clone());
+      copy.name = name;
+      copy.material.name = name;
+      mesh.matrixWorld.decompose(copy.position, copy.quaternion, copy.scale);
+      copy.position.y -= this.products.position.y; // 받침 높이는 빼고 바닥 = 0
+      root.add(copy);
+      const m = mesh.material;
+      const c = m.map ? new THREE.Color('#ffffff') : (m.attenuationColor && m.transmission ? m.attenuationColor : m.color);
+      const srgb = c.clone().convertLinearToSRGB();
+      mtl.push(`newmtl ${name}`, `Kd ${srgb.r.toFixed(4)} ${srgb.g.toFixed(4)} ${srgb.b.toFixed(4)}`,
+        `Ks 0.04 0.04 0.04`, `Pr ${(m.roughness ?? 0.5).toFixed(2)}`, `Pm ${(m.metalness ?? 0).toFixed(2)}`,
+        `d ${m.transmission ? '0.35' : '1.0'}`, 'illum 2');
+      if (tex && texName) { mtl.push(`map_Kd ${texName}`); textures[texName] = tex; }
+      mtl.push('');
+    };
+    const photo = this.image;
+    add(this.parts.body.mesh, 'bottle_body', this.parts.body.finish === 'photo' ? photo : null, 'photo.png');
+    add(this.parts.cap.mesh, 'bottle_cap', this.parts.cap.finish === 'photo' ? photo : null, 'photo.png');
+    add(this.label.mesh, 'bottle_label', this.labelTex?.image, 'label.png');
+    // 라벨 그림의 투명한 부분은 MTL 에서도 투명하게(map_d)
+    if (textures['label.png']) mtl.splice(mtl.lastIndexOf('map_Kd label.png') + 1, 0, 'map_d label.png');
+    add(this.box.print, 'box_print', this.box.crop, 'box_front.png');
+    add(this.box.side, 'box_side', null, null);
+    if (!root.children.length) return null;
+    root.updateMatrixWorld(true); // 내보내기는 월드 행렬을 쓴다(안 하면 전부 원점에 겹친다)
+    const obj ='mtllib model.mtl\n' + new OBJExporter().parse(root);
+    for (const m of root.children) m.material.dispose();
+    return { obj, mtl: mtl.join('\n'), textures, meshes: root.children.length };
+  }
 
   // azimuth: 위에서 본 각도(0 = 정면, -90 = 왼쪽), elevation: 바닥에서 올려본 각도
   setLight(patch) {
@@ -475,4 +621,22 @@ function marbleTexture() {
   marbleCache = new THREE.CanvasTexture(c);
   marbleCache.colorSpace = THREE.SRGBColorSpace;
   return marbleCache;
+}
+
+// BoxGeometry(그룹 순서: +x, -x, +y, -y, +z, -z) → [앞·뒤(+z·-z), 나머지 넷] 두 개의 새 지오메트리
+function splitBoxFaces(geo) {
+  const flat = geo.toNonIndexed();
+  const pick = (groups) => {
+    const out = new THREE.BufferGeometry();
+    for (const name of ['position', 'normal', 'uv']) {
+      const a = flat.attributes[name], size = a.itemSize, arr = [];
+      for (const g of groups) arr.push(...a.array.slice(g.start * size, (g.start + g.count) * size));
+      out.setAttribute(name, new THREE.Float32BufferAttribute(arr, size));
+    }
+    return out;
+  };
+  const gs = flat.groups;
+  const res = [pick([gs[4], gs[5]]), pick([gs[0], gs[1], gs[2], gs[3]])];
+  flat.dispose();
+  return res;
 }

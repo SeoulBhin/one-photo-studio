@@ -203,8 +203,10 @@ export class Viewer {
 
   boxSize() {
     const B = this.box, r = B.rect;
-    const H = HEIGHT * B.scale;
-    const W = H * ((r.right - r.left) * B.aspect) / (r.bottom - r.top);
+    // 크기 = 긴 변(세로로 긴 상자는 높이, 가로로 넓은 상자는 가로)이 병 높이의 몇 % 인가.
+    // 높이로만 정하면 납작하고 넓은 상자가 병보다 훨씬 넓어져 화면 밖으로 나갔다
+    const long = HEIGHT * B.scale, ratio = ((r.right - r.left) * B.aspect) / (r.bottom - r.top); // 가로/세로
+    const H = ratio > 1 ? long / ratio : long, W = H * ratio;
     return { W, H, D: W * B.depth };
   }
 

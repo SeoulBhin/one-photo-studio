@@ -619,7 +619,7 @@ export function App() {
                           </HStack>
                           {part === 'box' && (
                             <VStack gap={3}>
-                              <Slider label="크기(병 대비)" description="병 높이를 100% 로 본 상자 높이" min={40} max={150} value={boxDim.scale}
+                              <Slider label="크기(병 대비)" description="병 높이를 100% 로 본 상자의 긴 변" min={40} max={150} value={boxDim.scale}
                                 onChange={(x) => resizeBox('scale', x)} formatValue={(x) => `${x}%`} valueDisplay="inline" isDisabled={!has.box} data-testid="box-scale" />
                               <Slider label="두께" description="앞면 가로를 100% 로 본 옆면 폭" min={10} max={100} value={boxDim.depth}
                                 onChange={(x) => resizeBox('depth', x)} formatValue={(x) => `${x}%`} valueDisplay="inline" isDisabled={!has.box} data-testid="box-depth" />

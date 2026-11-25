@@ -159,7 +159,8 @@ def box_and_obj(page):
         dt.items.add(new File([b], 'box_navy.png', { type: 'image/png' }));
         document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); }""")
     page.wait_for_function("() => document.querySelector('[data-testid=status]').textContent.includes('box_navy.png · 상자 앞면')", timeout=5000)
-    check(abs(page.evaluate("studio.viewer.boxSize().H") - 4.5) < 1e-6, "끌어다 놓은 상자도 지금 크기 손잡이 값(150%)으로")
+    s = page.evaluate("studio.viewer.boxSize()")
+    check(abs(max(s["W"], s["H"]) - 4.5) < 1e-6 and s["W"] > s["H"], "끌어다 놓은 상자도 지금 크기 손잡이 값(150%)으로, 넓은 상자는 가로가 긴 변")
     # 상자 따기가 실패한 뒤 크기 손잡이를 움직여도 멈추지 않는다
     blank = OUT / "blank_box.png"
     Image.new("RGB", (600, 750), (205, 205, 205)).save(blank)

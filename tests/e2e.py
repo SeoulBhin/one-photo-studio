@@ -101,6 +101,13 @@ def box_and_obj(page):
     import re
     import zipfile
     print("[상자]")
+    ED = "(() => { const e = studio.editor; return [e.canvas.getBoundingClientRect().width, e.mode, !!e.profile, !!e.rect]; })()"
+    # 사진 없는 상자 탭에 갔다가 병으로 돌아오면 편집기가 병 선과 함께 제 크기로 다시 보인다
+    page.locator("button", has_text="상자").first.click()
+    page.locator("button", has_text="병").first.click()
+    page.wait_for_timeout(100)
+    w, mode, prof, _ = page.evaluate(ED)
+    check(w > 100 and mode == "bottle" and prof, f"빈 상자 탭에서 병으로 돌아옴: 편집기 폭 {w:.0f}·{mode}·옆선 {prof}")
     page.locator("button", has_text="상자").first.click()
     t0 = time.perf_counter()
     put_file(page, str(SAMPLE_DIR / "box_cream.png"))
@@ -190,6 +197,26 @@ def box_and_obj(page):
     check(blank_ratio(p_both) > 0.08, f"병+상자 PNG 빈 화면 아님({blank_ratio(p_both):.1%})")
 
     # OBJ 저장: zip 안에 obj·mtl·그림, 면 번호가 점 개수 안쪽, 쓴 재질이 mtl 에 다 있음
+    # 둘 다 있을 때 탭 오가기: 편집기가 그 제품으로 바뀌고 끌기도 그대로 된다
+    page.locator("button", has_text="병").first.click()
+    page.wait_for_timeout(100)
+    w, mode, prof, _ = page.evaluate(ED)
+    check(w > 100 and mode == "bottle" and prof, f"상자 → 병 탭: 편집기 {mode}·옆선 {prof}")
+    page.locator("button", has_text="상자").first.click()
+    page.wait_for_timeout(100)
+    w, mode, _, rect = page.evaluate(ED)
+    check(w > 100 and mode == "box" and rect, f"병 → 상자 탭: 편집기 {mode}·사각형 {rect}")
+    r0 = page.evaluate("studio.viewer.boxSize().W")
+    xy = page.evaluate("""() => { const e = studio.editor, c = e.canvas.getBoundingClientRect(), r = e.rect;
+        return [c.left + r.right * e.w, c.top + (r.top + r.bottom) / 2 * e.h]; }""")
+    page.mouse.move(*xy); page.mouse.down(); page.mouse.move(xy[0] + 15, xy[1], steps=3); page.mouse.up()
+    page.wait_for_timeout(100)
+    check(page.evaluate("studio.viewer.boxSize().W") != r0, "탭을 오간 뒤에도 사각형을 끌면 3D 가 바뀜")
+    page.click("[data-testid=redo]")
+    page.wait_for_function(BOX_OK, timeout=5000)
+    # 라벨도 OBJ 에 들어가게 예시 라벨을 감는다
+    tab(page, "라벨"); radio(page, "예시 라벨")
+
     print("[OBJ]")
     with page.expect_download() as dl:
         page.click("[data-testid=save-obj]")
@@ -197,7 +224,7 @@ def box_and_obj(page):
     dl.value.save_as(p_zip)
     z = zipfile.ZipFile(p_zip)
     names = set(z.namelist())
-    check({"model.obj", "model.mtl", "photo.png", "box_front.png"} <= names, f"zip 안 파일 {sorted(names)}")
+    check({"model.obj", "model.mtl", "photo.png", "box_front.png", "label.png"} <= names, f"zip 안 파일 {sorted(names)}")
     obj = z.read("model.obj").decode()
     mtl = z.read("model.mtl").decode()
     nv = sum(1 for l in obj.splitlines() if l.startswith("v "))
@@ -206,9 +233,9 @@ def box_and_obj(page):
     check(nv > 100 and nvt > 0 and idx and max(idx) <= nv and min(idx) >= 1, f"점 {nv}·텍스처 좌표 {nvt}·면 번호 {min(idx)}~{max(idx)}")
     used = set(re.findall(r"^usemtl (\S+)", obj, re.M))
     defined = set(re.findall(r"^newmtl (\S+)", mtl, re.M))
-    check({"bottle_body", "bottle_cap", "box_print", "box_side"} <= used and used <= defined, f"재질 {sorted(used)} 이 mtl 에 다 있음")
+    check({"bottle_body", "bottle_cap", "bottle_label", "box_print", "box_side"} <= used and used <= defined, f"재질 {sorted(used)} 이 mtl 에 다 있음")
     maps = set(re.findall(r"^map_Kd (\S+)", mtl, re.M))
-    check(maps <= names and "box_front.png" in maps, f"mtl 이 부르는 그림 {sorted(maps)} 이 zip 에 있음")
+    check(maps <= names and {"box_front.png", "label.png"} <= maps and "map_d label.png" in mtl, f"mtl 이 부르는 그림 {sorted(maps)} 이 zip 에 있음, 라벨 투명(map_d)")
     front = Image.open(io.BytesIO(z.read("box_front.png")))
     check(front.size[0] > 50 and front.size[1] > 50, f"상자 앞면 그림 {front.size}")
     ys = [float(l.split()[2]) for l in obj.splitlines() if l.startswith("v ")]

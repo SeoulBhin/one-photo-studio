@@ -353,19 +353,22 @@ export class Viewer {
     }
     if (!rMax) { rMax = 0.7; topH = HEIGHT; }
     rMax = Math.max(0.3, rMax);
+    // 받침 = 세트 반경 + 여백. 여백은 병 하나일 때(반경 0.8 안팎)의 비율 그대로라 병만 있으면 예전 크기와 같고,
+    // 병+상자처럼 세트가 넓어도 여백은 더 커지지 않는다(배수로 키웠더니 아크릴·대리석이 화면을 다 덮었다)
+    const ext = (k) => rMax + (k - 1) * Math.min(rMax, 0.8);
     const kind = this.set.pedestal;
     let h = 0, mesh = null;
     if (kind === 'round') {
       h = 0.5;
-      mesh = new THREE.Mesh(new THREE.CylinderGeometry(rMax * 1.9, rMax * 1.9, h, 96),
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(ext(1.9), ext(1.9), h, 96),
         new THREE.MeshStandardMaterial({ color: '#efece6', roughness: 0.8 }));
     } else if (kind === 'marble') {
       h = 0.22;
-      mesh = new THREE.Mesh(new THREE.BoxGeometry(rMax * 5.2, h, rMax * 3.6),
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(ext(2.6) * 2, h, ext(1.8) * 2),
         new THREE.MeshPhysicalMaterial({ map: marbleTexture(), roughness: 0.28, clearcoat: 0.6, clearcoatRoughness: 0.2 }));
     } else if (kind === 'acrylic') {
       h = 0.16;
-      mesh = new THREE.Mesh(new THREE.CylinderGeometry(rMax * 2.3, rMax * 2.3, h, 96),
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(ext(2.3), ext(2.3), h, 96),
         new THREE.MeshPhysicalMaterial({ color: '#ffffff', transmission: 0.92, roughness: 0.08, thickness: 0.3, ior: 1.49 }));
     }
     if (mesh) {

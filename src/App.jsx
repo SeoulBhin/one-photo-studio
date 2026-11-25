@@ -219,7 +219,7 @@ export function App() {
     tex.width = Math.max(1, Math.round(iw * k)); tex.height = Math.max(1, Math.round(ih * k));
     tex.getContext('2d').drawImage(img, 0, 0, tex.width, tex.height);
     Object.assign(kind === 'box' ? SB : S, { image: tex, source: img, aspect: iw / ih, name });
-    if (kind === 'box') SB.userColor = false; // 새 상자 사진이면 옆면 색도 새로 딴다
+    if (kind === 'box') { SB.userColor = false; SB.rect = null; } // 새 상자 사진이면 옆면 색·사각형도 새로 딴다(옛 사각형이 새 사진 위에 안 보이게)
     setHas((h) => ({ ...h, [kind]: true }));
     // 편집기 캔버스가 보이고 크기가 잡힌 다음 따기
     requestAnimationFrame(() => extract(tol, kind));
@@ -258,7 +258,7 @@ export function App() {
       v.clear('box');
       if (onEditor) e.setBox(SB.image, null);
       say(REASONS[reason] || REASONS.edge, true);
-      showMeta(null, 'box');
+      if (onEditor) showMeta(null, 'box');
       return;
     }
     SB.rect = rect;
